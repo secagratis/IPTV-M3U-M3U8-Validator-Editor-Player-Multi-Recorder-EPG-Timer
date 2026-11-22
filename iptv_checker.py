@@ -1,6 +1,8 @@
 import concurrent.futures
+import ctypes
 from datetime import datetime, timedelta, timezone
 import gzip
+import json
 import math
 import os
 import re
@@ -8,6 +10,7 @@ import shutil
 import socket
 import ssl
 import subprocess
+import sys
 import threading
 import time
 import tkinter as tk
@@ -16,6 +19,15 @@ import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
 from tkinter import filedialog, messagebox, ttk
+
+
+SECA_M3U_URL = "https://raw.githubusercontent.com/secagratis/Lista-Rai-IPTV/refs/heads/main/MIX.M3U"
+DEFAULT_M3U_URL = SECA_M3U_URL
+
+DEFAULT_EPG_URLS = [
+    "https://iptv-epg.org/files/epg-it.xml.gz",
+    "https://iptv-epg.org/files/epg-ch.xml.gz",
+]
 
 
 COUNTRY_MAP = {
@@ -73,6 +85,85 @@ COUNTRY_MAP = {
     "INT": "INT - Internazionale",
     "INTERNATIONAL": "INT - Internazionale",
 }
+
+THEMES = {
+    "light": {
+        "bg": "#f0f4f9",
+        "card_bg": "#ffffff",
+        "header_bg": "#1e293b",
+        "header_fg": "#ffffff",
+        "header_sub": "#94a3b8",
+        "fg": "#1e293b",
+        "muted": "#64748b",
+        "border": "#cbd5e1",
+        "entry_bg": "#ffffff",
+        "entry_fg": "#0f172a",
+        "tree_bg": "#ffffff",
+        "tree_alt": "#f8fafc",
+        "tree_fg": "#1e293b",
+        "tree_head_bg": "#e2e8f0",
+        "tree_head_fg": "#0f172a",
+        "tree_sel_bg": "#2563eb",
+        "tree_sel_fg": "#ffffff",
+        "accent": "#2563eb",
+        "accent_hover": "#1d4ed8",
+        "success": "#16a34a",
+        "success_hover": "#15803d",
+        "danger": "#dc2626",
+        "danger_hover": "#b91c1c",
+        "warning": "#d97706",
+        "warning_hover": "#b45309",
+        "neutral_btn": "#e2e8f0",
+        "neutral_btn_fg": "#1e293b",
+        "neutral_btn_hover": "#cbd5e1",
+        "tag_online": "#15803d",
+        "tag_offline": "#dc2626",
+        "tag_pending": "#64748b",
+        "tag_rec": "#d97706",
+        "tag_wait": "#2563eb",
+    },
+    "dark": {
+        "bg": "#0f172a",
+        "card_bg": "#1e293b",
+        "header_bg": "#020617",
+        "header_fg": "#f8fafc",
+        "header_sub": "#94a3b8",
+        "fg": "#f1f5f9",
+        "muted": "#94a3b8",
+        "border": "#334155",
+        "entry_bg": "#0f172a",
+        "entry_fg": "#f8fafc",
+        "tree_bg": "#1e293b",
+        "tree_alt": "#162032",
+        "tree_fg": "#f1f5f9",
+        "tree_head_bg": "#0f172a",
+        "tree_head_fg": "#e2e8f0",
+        "tree_sel_bg": "#3b82f6",
+        "tree_sel_fg": "#ffffff",
+        "accent": "#3b82f6",
+        "accent_hover": "#2563eb",
+        "success": "#22c55e",
+        "success_hover": "#16a34a",
+        "danger": "#ef4444",
+        "danger_hover": "#dc2626",
+        "warning": "#f59e0b",
+        "warning_hover": "#d97706",
+        "neutral_btn": "#334155",
+        "neutral_btn_fg": "#f1f5f9",
+        "neutral_btn_hover": "#475569",
+        "tag_online": "#4ade80",
+        "tag_offline": "#f87171",
+        "tag_pending": "#94a3b8",
+        "tag_rec": "#fbbf24",
+        "tag_wait": "#60a5fa",
+    },
+}
+
+
+def get_app_base_dir():
+    if getattr(sys, "frozen", False):
+        return os.path.dirname(os.path.abspath(sys.executable))
+    return os.path.dirname(os.path.abspath(__file__))
 
 
 def detect_country(extinf, group_title, name, url):
@@ -135,6 +226,47 @@ def normalize_key(text):
     if not text:
         return ""
     return re.sub(r"[^a-z0-9]", "", text.lower())
+
+
+def smart_channel_key(text):
+    """Normalizza il nome canale rimuovendo prefissi paese, tag qualità e suffissi generici."""
+    if not text:
+        return ""
+    s = text.lower().strip()
+    s = re.sub(r'^[\[\(\{]?\s*[a-z]{2,3}\s*[\]\)\}]?\s*[:\|\-\s]+', '', s)
+    s = re.sub(
+        r'\b(fhd|uhd|4k|hd|sd|hq|lq|hevc|h265|h264|1080p|720p|576p|480p|50fps|25fps|backup|alt|vip|raw|ita|italia|24h|live|plus|eventi|sky)\b',
+        ' ',
+        s,
+    )
+    return re.sub(r"[^a-z0-9]", "", s)
+
+
+def parse_hls_quality(manifest_text):
+    if not manifest_text:
+        return ""
+    best_h = 0
+    best_bw = 0
+    for line in manifest_text.splitlines():
+        if line.startswith("#EXT-X-STREAM-INF"):
+            m_res = re.search(r"RESOLUTION\s*=\s*(\d+)x(\d+)", line, re.IGNORECASE)
+            if m_res:
+                h = int(m_res.group(2))
+                if h > best_h:
+                    best_h = h
+            m_bw = re.search(r"BANDWIDTH\s*=\s*(\d+)", line, re.IGNORECASE)
+            if m_bw:
+                bw = int(m_bw.group(1))
+                if bw > best_bw:
+                    best_bw = bw
+    if best_h > 0:
+        if best_h >= 2160:
+            return "4K (2160p)"
+        return f"{best_h}p"
+    if best_bw > 0:
+        mbps = best_bw / 1_000_000.0
+        return f"HLS {mbps:.1f}M"
+    return ""
 
 
 def sanitize_filename(name):
@@ -200,9 +332,21 @@ def update_extinf_line(extinf, new_name, new_tvg_id):
 class IPTVCheckerApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("IPTV M3U / M3U8 Validator, Editor, Player, Multi-Recorder & EPG Timer")
-        self.root.geometry("1300x730")
-        self.root.minsize(1100, 620)
+        self.root.title("IPTV Studio Pro — Validator, Editor EPG, Player & Timer Recorder")
+        self.root.geometry("1480x830")
+        self.root.minsize(1200, 680)
+
+        self.config_path = os.path.join(get_app_base_dir(), "iptv_studio_config.json")
+        self.saved_cfg = self._load_config()
+
+        self.theme_mode = self.saved_cfg.get("theme_mode", "light")
+        if self.theme_mode not in THEMES:
+            self.theme_mode = "light"
+
+        self.styled_buttons = []
+        self.card_frames = []
+        self.themed_labels = []
+        self.themed_entries = []
 
         self.default_ua = (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -214,10 +358,14 @@ class IPTVCheckerApp:
         self.ssl_ctx.check_hostname = False
         self.ssl_ctx.verify_mode = ssl.CERT_NONE
 
+        self.ffprobe_semaphore = threading.Semaphore(3)
+
         self.channels = []
+        self.uid_counter = 0
         self.m3u_header_epg = ""
         self.epg_channels = {}
         self.epg_name_to_id = {}
+        self.epg_smart_to_id = {}
         self.epg_programmes = {}
 
         self.is_running = False
@@ -230,199 +378,729 @@ class IPTVCheckerApp:
         self.total_targets = 0
         self.scan_finished_flag = False
 
-        # Gestione registrazioni e timer EPG: {rec_id: dict}
         self.active_recordings = {}
         self.rec_counter = 0
         self.rec_poll_scheduled = False
         self.rec_manager_win = None
         self.rec_manager_tree = None
 
+        # Stato Player Integrato
+        self.embed_proc = None
+        self.embed_hwnd = None
+        self.embed_channel_name = ""
+        self.embed_muted = False
+        self.embed_poll_scheduled = False
+
+        self.style = ttk.Style(self.root)
+        try:
+            self.style.theme_use("clam")
+        except Exception:
+            pass
+
         self._build_ui()
+        self._restore_saved_settings()
         self._auto_detect_player()
+        self._refresh_ffmpeg_badge()
+        self._apply_theme()
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
+        self.root.after(250, self._startup_auto_load)
+
+    # --- Persistenza Impostazioni e Timer ---
+    def _load_config(self):
+        try:
+            if os.path.isfile(self.config_path):
+                with open(self.config_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    if isinstance(data, dict):
+                        return data
+        except Exception:
+            pass
+        return {}
+
+    def _collect_pending_timers_for_save(self):
+        timers = []
+        now = time.time()
+        for rec in self.active_recordings.values():
+            if rec["state"] == "WAITING" and rec["scheduled_start"] > now:
+                timers.append(
+                    {
+                        "channel_name": rec["channel_name"],
+                        "prog_title": rec["prog_title"],
+                        "file_path": rec["file_path"],
+                        "scheduled_start": rec["scheduled_start"],
+                        "duration_minutes": max(1, int(rec["limit_seconds"] // 60)) if rec["limit_seconds"] > 0 else 60,
+                    }
+                )
+        return timers
+
+    def _save_config(self):
+        data = {
+            "theme_mode": self.theme_mode,
+            "m3u_source": self.file_path_var.get().strip(),
+            "epg_source": self.epg_source_var.get().strip(),
+            "rec_folder": self.rec_folder_var.get().strip(),
+            "player_type": self.player_type_var.get(),
+            "player_exe": self.player_exe_var.get().strip(),
+            "timeout": int(self.timeout_var.get()),
+            "workers": int(self.workers_var.get()),
+            "deep_check": bool(self.deep_check_var.get()),
+            "probe_quality": bool(self.probe_quality_var.get()),
+            "volume": int(self.volume_var.get()) if hasattr(self, "volume_var") else 80,
+            "scheduled_timers": self._collect_pending_timers_for_save(),
+        }
+        try:
+            with open(self.config_path, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2, ensure_ascii=False)
+        except Exception:
+            pass
+
+    def _restore_saved_settings(self):
+        saved_m3u = self.saved_cfg.get("m3u_source", "").strip()
+        if saved_m3u and saved_m3u != "[Lista incollata]":
+            self.file_path_var.set(saved_m3u)
+        else:
+            self.file_path_var.set(DEFAULT_M3U_URL)
+
+        saved_epg = self.saved_cfg.get("epg_source", "").strip()
+        if saved_epg:
+            self.epg_source_var.set(saved_epg)
+        else:
+            self.epg_source_var.set(", ".join(DEFAULT_EPG_URLS))
+
+        if self.saved_cfg.get("rec_folder"):
+            self.rec_folder_var.set(self.saved_cfg["rec_folder"])
+        if self.saved_cfg.get("player_type") in ("vlc", "ffplay"):
+            self.player_type_var.set(self.saved_cfg["player_type"])
+        if "timeout" in self.saved_cfg:
+            self.timeout_var.set(max(2, min(30, int(self.saved_cfg["timeout"]))))
+        if "workers" in self.saved_cfg:
+            self.workers_var.set(max(1, min(30, int(self.saved_cfg["workers"]))))
+        if "deep_check" in self.saved_cfg:
+            self.deep_check_var.set(bool(self.saved_cfg["deep_check"]))
+        if "probe_quality" in self.saved_cfg:
+            self.probe_quality_var.set(bool(self.saved_cfg["probe_quality"]))
+        if "volume" in self.saved_cfg and hasattr(self, "volume_var"):
+            self.volume_var.set(max(0, min(100, int(self.saved_cfg["volume"]))))
+
+    def _restore_saved_timers(self):
+        raw_timers = self.saved_cfg.get("scheduled_timers") or []
+        now = time.time()
+        valid_timers = [
+            t
+            for t in raw_timers
+            if isinstance(t, dict)
+            and t.get("channel_name")
+            and t.get("file_path")
+            and float(t.get("scheduled_start", 0)) > now
+        ]
+        if not valid_timers:
+            return
+
+        if not messagebox.askyesno(
+            "Ripristina Timer Salvati",
+            f"Trovati {len(valid_timers)} timer futuri salvati nella sessione precedente.\n"
+            "Vuoi riattivarli automaticamente?",
+        ):
+            return
+
+        for t in valid_timers:
+            ch = next(
+                (c for c in self.channels if normalize_key(c["name"]) == normalize_key(t["channel_name"])),
+                None,
+            )
+            if not ch:
+                continue
+            sched_ts = float(t["scheduled_start"])
+            mins = max(1, int(t.get("duration_minutes", 60)))
+            out_path = t["file_path"]
+            if any(os.path.abspath(r["file_path"]) == os.path.abspath(out_path) for r in self.active_recordings.values()):
+                continue
+
+            self.rec_counter += 1
+            rec_id = self.rec_counter
+            rec_info = {
+                "id": rec_id,
+                "ch_uid": ch["uid"],
+                "channel_name": ch["name"],
+                "prog_title": t.get("prog_title", ""),
+                "file_path": out_path,
+                "state": "WAITING",
+                "scheduled_start": sched_ts,
+                "start_time": sched_ts,
+                "limit_seconds": mins * 60,
+                "stop_event": threading.Event(),
+                "timer_expired": False,
+                "proc": None,
+            }
+            self.active_recordings[rec_id] = rec_info
+            threading.Thread(
+                target=self._record_worker,
+                args=(rec_info, dict(ch), self._find_ffmpeg()),
+                daemon=True,
+            ).start()
+            self._update_channel_row_visual(ch)
+
+        if self.active_recordings and not self.rec_poll_scheduled:
+            self.rec_poll_scheduled = True
+            self.root.after(500, self._poll_recording_status)
+        self._update_rec_controls_ui()
+        self._update_stats()
+
+    def _startup_auto_load(self):
+        m3u_src = self.file_path_var.get().strip()
+        if m3u_src:
+            if m3u_src.lower().startswith(("http://", "https://")):
+                self._load_m3u_from_url(silent=True)
+            elif os.path.isfile(m3u_src):
+                try:
+                    with open(m3u_src, "r", encoding="utf-8", errors="replace") as f:
+                        self._parse_m3u_content(f.read(), preserve_epg_box=True)
+                except Exception:
+                    pass
+
+        epg_src = self.epg_source_var.get().strip()
+        if epg_src:
+            self._start_epg_load(silent=True)
+
+        self.root.after(600, self._restore_saved_timers)
+
+    def _make_btn(self, parent, text, command, kind="neutral", width=None, state=tk.NORMAL, padx=11, pady=5):
+        btn = tk.Button(
+            parent,
+            text=text,
+            command=command,
+            relief=tk.FLAT,
+            bd=0,
+            cursor="hand2",
+            font=("Segoe UI", 9, "bold" if kind != "neutral" else "normal"),
+            padx=padx,
+            pady=pady,
+            state=state,
+        )
+        if width:
+            btn.config(width=width)
+        btn._btn_kind = kind
+        self.styled_buttons.append(btn)
+
+        def on_enter(_e):
+            if str(btn["state"]) != tk.DISABLED:
+                t = THEMES[self.theme_mode]
+                hover_map = {
+                    "accent": t["accent_hover"],
+                    "success": t["success_hover"],
+                    "danger": t["danger_hover"],
+                    "warning": t["warning_hover"],
+                    "neutral": t["neutral_btn_hover"],
+                }
+                btn.config(bg=hover_map.get(btn._btn_kind, t["neutral_btn_hover"]))
+
+        def on_leave(_e):
+            self._style_single_button(btn)
+
+        btn.bind("<Enter>", on_enter)
+        btn.bind("<Leave>", on_leave)
+        self._style_single_button(btn)
+        return btn
+
+    def _style_single_button(self, btn):
+        t = THEMES[self.theme_mode]
+        kind = getattr(btn, "_btn_kind", "neutral")
+        if str(btn["state"]) == tk.DISABLED:
+            btn.config(bg=t["neutral_btn"], fg=t["muted"])
+            return
+        bg_map = {
+            "accent": (t["accent"], "#ffffff"),
+            "success": (t["success"], "#ffffff"),
+            "danger": (t["danger"], "#ffffff"),
+            "warning": (t["warning"], "#ffffff"),
+            "neutral": (t["neutral_btn"], t["neutral_btn_fg"]),
+        }
+        bg, fg = bg_map.get(kind, (t["neutral_btn"], t["neutral_btn_fg"]))
+        btn.config(bg=bg, fg=fg, activebackground=bg, activeforeground=fg)
+
+    def _toggle_theme(self):
+        self.theme_mode = "dark" if self.theme_mode == "light" else "light"
+        self.theme_btn.config(text="☀️ Tema Chiaro" if self.theme_mode == "dark" else "🌙 Tema Scuro")
+        self._apply_theme()
+        self._refresh_tree()
+
+    def _apply_theme(self):
+        t = THEMES[self.theme_mode]
+        self.root.configure(bg=t["bg"])
+
+        self.header_banner.config(bg=t["header_bg"])
+        self.title_box.config(bg=t["header_bg"])
+        self.header_right_box.config(bg=t["header_bg"])
+        self.header_title_lbl.config(bg=t["header_bg"], fg=t["header_fg"])
+        self.header_sub_lbl.config(bg=t["header_bg"], fg=t["header_sub"])
+
+        for cf in self.card_frames:
+            cf.config(bg=t["card_bg"], highlightbackground=t["border"], highlightthickness=1)
+
+        for lbl, role in self.themed_labels:
+            bg = t["card_bg"] if role != "bg" else t["bg"]
+            fg = t["muted"] if role == "muted" else t["fg"]
+            if isinstance(lbl, tk.Frame):
+                lbl.config(bg=bg)
+            else:
+                lbl.config(bg=bg, fg=fg)
+
+        for ent in self.themed_entries:
+            ent.config(
+                bg=t["entry_bg"],
+                fg=t["entry_fg"],
+                insertbackground=t["entry_fg"],
+                highlightbackground=t["border"],
+                highlightcolor=t["accent"],
+                highlightthickness=1,
+                relief=tk.FLAT,
+            )
+
+        if hasattr(self, "video_stage"):
+            self.video_stage.config(bg="#050811")
+        if hasattr(self, "video_placeholder_lbl"):
+            self.video_placeholder_lbl.config(bg="#050811", fg="#94a3b8")
+        if hasattr(self, "embed_now_lbl"):
+            self.embed_now_lbl.config(bg=t["card_bg"], fg=t["fg"])
+        if hasattr(self, "vol_scale"):
+            self.vol_scale.config(bg=t["card_bg"], fg=t["fg"], troughcolor=t["neutral_btn"], highlightthickness=0)
+
+        for btn in self.styled_buttons:
+            self._style_single_button(btn)
+
+        self.style.configure("TFrame", background=t["bg"])
+        self.style.configure("Card.TFrame", background=t["card_bg"])
+        self.style.configure("TLabel", background=t["card_bg"], foreground=t["fg"], font=("Segoe UI", 9))
+        self.style.configure("Bg.TLabel", background=t["bg"], foreground=t["fg"], font=("Segoe UI", 9))
+        self.style.configure("TRadiobutton", background=t["card_bg"], foreground=t["fg"], font=("Segoe UI", 9))
+        self.style.map("TRadiobutton", background=[("active", t["card_bg"])])
+        self.style.configure("TCheckbutton", background=t["card_bg"], foreground=t["fg"], font=("Segoe UI", 9))
+        self.style.map("TCheckbutton", background=[("active", t["card_bg"])])
+
+        self.style.configure(
+            "Treeview",
+            background=t["tree_bg"],
+            fieldbackground=t["tree_bg"],
+            foreground=t["tree_fg"],
+            rowheight=26,
+            borderwidth=0,
+            font=("Segoe UI", 9),
+        )
+        self.style.configure(
+            "Treeview.Heading",
+            background=t["tree_head_bg"],
+            foreground=t["tree_head_fg"],
+            relief="flat",
+            font=("Segoe UI", 9, "bold"),
+            padding=(6, 6),
+        )
+        self.style.map(
+            "Treeview",
+            background=[("selected", t["tree_sel_bg"])],
+            foreground=[("selected", t["tree_sel_fg"])],
+        )
+        self.style.map("Treeview.Heading", background=[("active", t["border"])])
+
+        self.style.configure(
+            "Modern.Horizontal.TProgressbar",
+            troughcolor=t["neutral_btn"],
+            background=t["accent"],
+            borderwidth=0,
+            thickness=10,
+        )
+
+        self.tree.tag_configure("ONLINE", foreground=t["tag_online"], background=t["tree_bg"])
+        self.tree.tag_configure("ONLINE_ALT", foreground=t["tag_online"], background=t["tree_alt"])
+        self.tree.tag_configure("OFFLINE", foreground=t["tag_offline"], background=t["tree_bg"])
+        self.tree.tag_configure("OFFLINE_ALT", foreground=t["tag_offline"], background=t["tree_alt"])
+        self.tree.tag_configure("PENDING", foreground=t["tag_pending"], background=t["tree_bg"])
+        self.tree.tag_configure("PENDING_ALT", foreground=t["tag_pending"], background=t["tree_alt"])
+        self.tree.tag_configure("RECORDING", foreground=t["tag_rec"], background=t["tree_bg"])
+        self.tree.tag_configure("RECORDING_ALT", foreground=t["tag_rec"], background=t["tree_alt"])
+        self.tree.tag_configure("WAITING", foreground=t["tag_wait"], background=t["tree_bg"])
+        self.tree.tag_configure("WAITING_ALT", foreground=t["tag_wait"], background=t["tree_alt"])
+
     def _build_ui(self):
-        main_frame = ttk.Frame(self.root, padding="12")
+        # --- Header Banner ---
+        self.header_banner = tk.Frame(self.root, padx=18, pady=10)
+        self.header_banner.pack(fill=tk.X)
+
+        self.title_box = tk.Frame(self.header_banner)
+        self.title_box.pack(side=tk.LEFT)
+        self.header_title_lbl = tk.Label(
+            self.title_box,
+            text="📺  IPTV Studio Pro — Validator, Editor EPG, Player & Timer Recorder",
+            font=("Segoe UI", 13, "bold"),
+        )
+        self.header_title_lbl.pack(anchor=tk.W)
+        self.header_sub_lbl = tk.Label(
+            self.title_box,
+            text="Lista Seca MIX.M3U & EPG ITA/CH • Player integrato + VLC/ffplay • Registrazione con Timer",
+            font=("Segoe UI", 9),
+        )
+        self.header_sub_lbl.pack(anchor=tk.W, pady=(2, 0))
+
+        self.header_right_box = tk.Frame(self.header_banner)
+        self.header_right_box.pack(side=tk.RIGHT, pady=2)
+
+        self.ffmpeg_badge = tk.Label(
+            self.header_right_box,
+            text="ffmpeg: verifica...",
+            font=("Segoe UI", 8, "bold"),
+            padx=9,
+            pady=5,
+        )
+        self.ffmpeg_badge.pack(side=tk.LEFT, padx=(0, 8))
+
+        self.theme_btn = self._make_btn(
+            self.header_right_box,
+            text="☀️ Tema Chiaro" if self.theme_mode == "dark" else "🌙 Tema Scuro",
+            command=self._toggle_theme,
+            kind="neutral",
+        )
+        self.theme_btn.pack(side=tk.LEFT)
+
+        # --- Corpo Principale ---
+        main_frame = ttk.Frame(self.root, padding="12 10 12 10")
         main_frame.pack(fill=tk.BOTH, expand=True)
 
-        top_frame = ttk.LabelFrame(main_frame, text="1. Playlist, Guida EPG (XMLTV), Player & Parametri", padding="10")
-        top_frame.pack(fill=tk.X, pady=(0, 10))
+        # --- Card 1: Configurazione Sorgenti & Parametri ---
+        top_card = tk.Frame(main_frame, padx=12, pady=9)
+        top_card.pack(fill=tk.X, pady=(0, 8))
+        self.card_frames.append(top_card)
 
-        row1 = ttk.Frame(top_frame)
+        row1 = ttk.Frame(top_card, style="Card.TFrame")
         row1.pack(fill=tk.X, pady=(0, 6))
 
-        ttk.Label(row1, text="File M3U:", width=11).pack(side=tk.LEFT, padx=(0, 5))
-        self.file_path_var = tk.StringVar()
-        ttk.Entry(row1, textvariable=self.file_path_var).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 6))
+        lbl_m3u = tk.Label(row1, text="📂 Playlist M3U:", width=14, anchor=tk.W, font=("Segoe UI", 9, "bold"))
+        lbl_m3u.pack(side=tk.LEFT)
+        self.themed_labels.append((lbl_m3u, "card"))
 
-        ttk.Button(row1, text="Apri .m3u / .m3u8...", command=self._load_file).pack(side=tk.LEFT, padx=(0, 5))
-        ttk.Button(row1, text="Incolla Lista / URL", command=self._open_paste_dialog).pack(side=tk.LEFT)
+        self.file_path_var = tk.StringVar(value=DEFAULT_M3U_URL)
+        ent_m3u = tk.Entry(row1, textvariable=self.file_path_var, font=("Segoe UI", 9))
+        ent_m3u.pack(side=tk.LEFT, fill=tk.X, expand=True, ipady=4, padx=(0, 6))
+        self.themed_entries.append(ent_m3u)
 
-        row_epg = ttk.Frame(top_frame)
+        self._make_btn(row1, "Apri File...", self._load_file, kind="neutral").pack(side=tk.LEFT, padx=(0, 5))
+        self.load_seca_btn = self._make_btn(row1, "📺 Lista Seca", self._load_seca_list, kind="success")
+        self.load_seca_btn.pack(side=tk.LEFT, padx=(0, 5))
+        self.load_url_btn = self._make_btn(
+            row1, "🌐 Carica URL", lambda: self._load_m3u_from_url(silent=False), kind="accent"
+        )
+        self.load_url_btn.pack(side=tk.LEFT, padx=(0, 5))
+        self._make_btn(row1, "Incolla Lista", self._open_paste_dialog, kind="neutral").pack(side=tk.LEFT)
+
+        row_epg = ttk.Frame(top_card, style="Card.TFrame")
         row_epg.pack(fill=tk.X, pady=(0, 6))
 
-        ttk.Label(row_epg, text="EPG XMLTV:", width=11).pack(side=tk.LEFT, padx=(0, 5))
-        self.epg_source_var = tk.StringVar()
-        ttk.Entry(row_epg, textvariable=self.epg_source_var).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 6))
+        lbl_epg = tk.Label(row_epg, text="🗓️ EPG XMLTV:", width=14, anchor=tk.W, font=("Segoe UI", 9, "bold"))
+        lbl_epg.pack(side=tk.LEFT)
+        self.themed_labels.append((lbl_epg, "card"))
 
-        ttk.Button(row_epg, text="Apri .xml / .gz...", command=self._browse_epg_file).pack(side=tk.LEFT, padx=(0, 5))
-        self.load_epg_btn = ttk.Button(row_epg, text="Carica / Verifica EPG", command=self._start_epg_load)
-        self.load_epg_btn.pack(side=tk.LEFT)
+        self.epg_source_var = tk.StringVar(value=", ".join(DEFAULT_EPG_URLS))
+        ent_epg = tk.Entry(row_epg, textvariable=self.epg_source_var, font=("Segoe UI", 9))
+        ent_epg.pack(side=tk.LEFT, fill=tk.X, expand=True, ipady=4, padx=(0, 6))
+        self.themed_entries.append(ent_epg)
 
-        row_player = ttk.Frame(top_frame)
-        row_player.pack(fill=tk.X, pady=(0, 8))
+        self._make_btn(row_epg, "Apri .xml / .gz...", self._browse_epg_file, kind="neutral").pack(side=tk.LEFT, padx=(0, 5))
+        self.load_epg_btn = self._make_btn(
+            row_epg, "Carica EPG", lambda: self._start_epg_load(silent=False), kind="accent"
+        )
+        self.load_epg_btn.pack(side=tk.LEFT, padx=(0, 5))
+        self._make_btn(row_epg, "✨ Auto-EPG", self._auto_match_epg_smart, kind="warning").pack(side=tk.LEFT)
 
-        ttk.Label(row_player, text="Player:", width=11).pack(side=tk.LEFT, padx=(0, 5))
+        row_player = ttk.Frame(top_card, style="Card.TFrame")
+        row_player.pack(fill=tk.X, pady=(0, 7))
+
+        lbl_pl = tk.Label(row_player, text="🎬 Player Esterno:", width=14, anchor=tk.W, font=("Segoe UI", 9, "bold"))
+        lbl_pl.pack(side=tk.LEFT)
+        self.themed_labels.append((lbl_pl, "card"))
+
         self.player_type_var = tk.StringVar(value="vlc")
         ttk.Radiobutton(
             row_player, text="VLC", variable=self.player_type_var, value="vlc", command=self._on_player_type_change
-        ).pack(side=tk.LEFT, padx=(0, 8))
+        ).pack(side=tk.LEFT, padx=(0, 6))
         ttk.Radiobutton(
             row_player, text="ffplay", variable=self.player_type_var, value="ffplay", command=self._on_player_type_change
-        ).pack(side=tk.LEFT, padx=(0, 10))
+        ).pack(side=tk.LEFT, padx=(0, 8))
 
         self.player_exe_var = tk.StringVar()
-        ttk.Entry(row_player, textvariable=self.player_exe_var).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 6))
-        ttk.Button(row_player, text="Sfoglia...", width=9, command=self._browse_player).pack(side=tk.LEFT)
+        ent_pl = tk.Entry(row_player, textvariable=self.player_exe_var, font=("Segoe UI", 9))
+        ent_pl.pack(side=tk.LEFT, fill=tk.X, expand=True, ipady=4, padx=(0, 5))
+        self.themed_entries.append(ent_pl)
 
-        row2 = ttk.Frame(top_frame)
+        self._make_btn(row_player, "Sfoglia...", self._browse_player, kind="neutral", padx=8).pack(side=tk.LEFT, padx=(0, 12))
+
+        lbl_recdir = tk.Label(row_player, text="📁 Cartella REC:", anchor=tk.W, font=("Segoe UI", 9, "bold"))
+        lbl_recdir.pack(side=tk.LEFT, padx=(0, 5))
+        self.themed_labels.append((lbl_recdir, "card"))
+
+        self.rec_folder_var = tk.StringVar()
+        ent_recdir = tk.Entry(row_player, textvariable=self.rec_folder_var, width=24, font=("Segoe UI", 9))
+        ent_recdir.pack(side=tk.LEFT, ipady=4, padx=(0, 5))
+        self.themed_entries.append(ent_recdir)
+
+        self._make_btn(row_player, "Scegli...", self._browse_rec_folder, kind="neutral", padx=8).pack(side=tk.LEFT, padx=(0, 4))
+        self._make_btn(row_player, "Apri", self._open_rec_folder, kind="neutral", padx=8).pack(side=tk.LEFT)
+
+        row2 = ttk.Frame(top_card, style="Card.TFrame")
         row2.pack(fill=tk.X)
 
-        ttk.Label(row2, text="Timeout (sec):").pack(side=tk.LEFT, padx=(0, 4))
+        ttk.Label(row2, text="Timeout (s):").pack(side=tk.LEFT, padx=(0, 4))
         self.timeout_var = tk.IntVar(value=5)
-        ttk.Spinbox(row2, from_=2, to=30, width=5, textvariable=self.timeout_var).pack(side=tk.LEFT, padx=(0, 15))
+        ttk.Spinbox(row2, from_=2, to=30, width=4, textvariable=self.timeout_var).pack(side=tk.LEFT, padx=(0, 12))
 
-        ttk.Label(row2, text="Thread simultanei:").pack(side=tk.LEFT, padx=(0, 4))
+        ttk.Label(row2, text="Thread:").pack(side=tk.LEFT, padx=(0, 4))
         self.workers_var = tk.IntVar(value=12)
-        ttk.Spinbox(row2, from_=1, to=30, width=5, textvariable=self.workers_var).pack(side=tk.LEFT, padx=(0, 15))
+        ttk.Spinbox(row2, from_=1, to=30, width=4, textvariable=self.workers_var).pack(side=tk.LEFT, padx=(0, 12))
 
         self.deep_check_var = tk.BooleanVar(value=True)
         ttk.Checkbutton(
             row2,
-            text="Verifica contenuto manifest (#EXTM3U / segmenti)",
+            text="Verifica manifest HLS",
             variable=self.deep_check_var,
-        ).pack(side=tk.LEFT, padx=(0, 15))
+        ).pack(side=tk.LEFT, padx=(0, 10))
 
-        self.stop_btn = ttk.Button(row2, text="Ferma", state=tk.DISABLED, command=self._stop_check)
+        self.probe_quality_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(
+            row2,
+            text="Rileva Risoluzione (1080p/720p)",
+            variable=self.probe_quality_var,
+        ).pack(side=tk.LEFT, padx=(0, 12))
+
+        self.stop_btn = self._make_btn(row2, "⏹ Ferma", self._stop_check, kind="danger", state=tk.DISABLED)
         self.stop_btn.pack(side=tk.RIGHT)
 
-        self.start_btn = ttk.Button(row2, text="Avvia Controllo Flussi", command=self._start_check)
+        self.start_btn = self._make_btn(row2, "⚡ Avvia Controllo Flussi", self._start_check, kind="accent")
         self.start_btn.pack(side=tk.RIGHT, padx=(0, 6))
 
-        stats_frame = ttk.Frame(main_frame)
-        stats_frame.pack(fill=tk.X, pady=(0, 8))
+        self.retry_offline_btn = self._make_btn(
+            row2, "🔄 Retry Offline", self._recheck_offline_channels, kind="warning"
+        )
+        self.retry_offline_btn.pack(side=tk.RIGHT, padx=(0, 6))
 
-        self.stats_var = tk.StringVar(value="Totale: 0  |  Online: 0  |  Offline: 0  |  Con EPG: 0")
-        ttk.Label(stats_frame, textvariable=self.stats_var, font=("Segoe UI", 9, "bold")).pack(side=tk.LEFT)
+        self._make_btn(row2, "🧹 Duplicati", self._remove_duplicates, kind="neutral").pack(side=tk.RIGHT, padx=(0, 6))
+        self._make_btn(row2, "↩ Ordine Orig.", self._restore_original_order, kind="neutral").pack(side=tk.RIGHT, padx=(0, 6))
 
-        filter_box = ttk.Frame(stats_frame)
+        # --- Card 2: Statistiche KPI + Ricerca Canale per Nome + Filtri ---
+        stats_card = tk.Frame(main_frame, padx=12, pady=7)
+        stats_card.pack(fill=tk.X, pady=(0, 8))
+        self.card_frames.append(stats_card)
+
+        self.stats_var = tk.StringVar(value="📊 Totale: 0   •   🟢 Online: 0   •   🔴 Offline: 0   •   🗓️ EPG: 0")
+        lbl_stats = tk.Label(stats_card, textvariable=self.stats_var, font=("Segoe UI", 9, "bold"))
+        lbl_stats.pack(side=tk.LEFT)
+        self.themed_labels.append((lbl_stats, "card"))
+
+        filter_box = ttk.Frame(stats_card, style="Card.TFrame")
         filter_box.pack(side=tk.RIGHT)
 
-        ttk.Label(filter_box, text="Paese:").pack(side=tk.LEFT, padx=(0, 4))
+        ttk.Label(filter_box, text="🔍 Cerca Canale:").pack(side=tk.LEFT, padx=(0, 4))
+        self.search_query_var = tk.StringVar()
+        ent_search = tk.Entry(filter_box, textvariable=self.search_query_var, width=20, font=("Segoe UI", 9))
+        ent_search.pack(side=tk.LEFT, ipady=3, padx=(0, 3))
+        self.themed_entries.append(ent_search)
+        self.search_query_var.trace_add("write", lambda *_: self._refresh_tree())
+
+        self._make_btn(
+            filter_box,
+            "✖",
+            lambda: self.search_query_var.set(""),
+            kind="neutral",
+            padx=6,
+            pady=2,
+        ).pack(side=tk.LEFT, padx=(0, 10))
+
+        self.fav_only_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            filter_box,
+            text="Solo ★",
+            variable=self.fav_only_var,
+            command=self._refresh_tree,
+        ).pack(side=tk.LEFT, padx=(0, 10))
+
+        ttk.Label(filter_box, text="🌍 Paese:").pack(side=tk.LEFT, padx=(0, 4))
         self.country_filter_var = tk.StringVar(value="Tutti i paesi")
         self.country_combo = ttk.Combobox(
             filter_box,
             textvariable=self.country_filter_var,
             values=["Tutti i paesi"],
             state="readonly",
-            width=16,
+            width=15,
         )
-        self.country_combo.pack(side=tk.LEFT, padx=(0, 12))
+        self.country_combo.pack(side=tk.LEFT, padx=(0, 10))
         self.country_combo.bind("<<ComboboxSelected>>", lambda e: self._refresh_tree())
 
-        ttk.Label(filter_box, text="Stato:").pack(side=tk.LEFT, padx=(0, 5))
         self.filter_var = tk.StringVar(value="ALL")
-        for label, val in [("Tutti", "ALL"), ("Solo Online", "ONLINE"), ("Solo Offline", "OFFLINE")]:
+        for label, val in [("Tutti", "ALL"), ("Online", "ONLINE"), ("Offline", "OFFLINE")]:
             ttk.Radiobutton(
                 filter_box,
                 text=label,
                 variable=self.filter_var,
                 value=val,
                 command=self._refresh_tree,
-            ).pack(side=tk.LEFT, padx=(0, 8))
+            ).pack(side=tk.LEFT, padx=(0, 6))
 
-        table_frame = ttk.Frame(main_frame)
-        table_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
+        # --- Card 3: Split Tabella Canali + Player Integrato ---
+        split_pane = ttk.PanedWindow(main_frame, orient=tk.HORIZONTAL)
+        split_pane.pack(fill=tk.BOTH, expand=True, pady=(0, 8))
 
-        columns = ("idx", "status", "country", "name", "epg", "latency", "detail", "url")
-        self.tree = ttk.Treeview(table_frame, columns=columns, show="headings", selectmode="extended")
+        table_card = tk.Frame(split_pane, padx=2, pady=2)
+        self.card_frames.append(table_card)
+        split_pane.add(table_card, weight=3)
+
+        columns = ("idx", "fav", "status", "country", "name", "quality", "epg", "latency", "detail", "url")
+        self.tree = ttk.Treeview(table_card, columns=columns, show="headings", selectmode="extended")
 
         self.tree.heading("idx", text="#")
+        self.tree.heading("fav", text="★")
         self.tree.heading("status", text="Stato")
         self.tree.heading("country", text="Paese")
         self.tree.heading("name", text="Canale")
+        self.tree.heading("quality", text="Qualità")
         self.tree.heading("epg", text="EPG / In Onda Ora")
         self.tree.heading("latency", text="Latenza")
-        self.tree.heading("detail", text="Esito / Codice HTTP")
+        self.tree.heading("detail", text="Esito / HTTP")
         self.tree.heading("url", text="URL Flusso")
 
         self.tree.column("idx", width=42, anchor=tk.CENTER, stretch=False)
-        self.tree.column("status", width=92, anchor=tk.CENTER, stretch=False)
-        self.tree.column("country", width=115, anchor=tk.W, stretch=False)
-        self.tree.column("name", width=170, anchor=tk.W)
-        self.tree.column("epg", width=240, anchor=tk.W)
-        self.tree.column("latency", width=70, anchor=tk.CENTER, stretch=False)
-        self.tree.column("detail", width=155, anchor=tk.W)
-        self.tree.column("url", width=260, anchor=tk.W)
+        self.tree.column("fav", width=34, anchor=tk.CENTER, stretch=False)
+        self.tree.column("status", width=96, anchor=tk.CENTER, stretch=False)
+        self.tree.column("country", width=112, anchor=tk.W, stretch=False)
+        self.tree.column("name", width=165, anchor=tk.W)
+        self.tree.column("quality", width=82, anchor=tk.CENTER, stretch=False)
+        self.tree.column("epg", width=230, anchor=tk.W)
+        self.tree.column("latency", width=66, anchor=tk.CENTER, stretch=False)
+        self.tree.column("detail", width=135, anchor=tk.W)
+        self.tree.column("url", width=210, anchor=tk.W)
 
-        self.tree.tag_configure("ONLINE", foreground="#137333")
-        self.tree.tag_configure("OFFLINE", foreground="#c5221f")
-        self.tree.tag_configure("PENDING", foreground="#5f6368")
-        self.tree.tag_configure("RECORDING", foreground="#b06000")
-        self.tree.tag_configure("WAITING", foreground="#1a73e8")
-
-        vsb = ttk.Scrollbar(table_frame, orient="vertical", command=self.tree.yview)
-        hsb = ttk.Scrollbar(table_frame, orient="horizontal", command=self.tree.xview)
+        vsb = ttk.Scrollbar(table_card, orient="vertical", command=self.tree.yview)
+        hsb = ttk.Scrollbar(table_card, orient="horizontal", command=self.tree.xview)
         self.tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
 
         self.tree.grid(row=0, column=0, sticky=tk.NSEW)
         vsb.grid(row=0, column=1, sticky=tk.NS)
         hsb.grid(row=1, column=0, sticky=tk.EW)
 
-        table_frame.rowconfigure(0, weight=1)
-        table_frame.columnconfigure(0, weight=1)
+        table_card.rowconfigure(0, weight=1)
+        table_card.columnconfigure(0, weight=1)
 
-        self.tree.bind("<Double-1>", lambda e: self._play_selected())
+        self.tree.bind("<Double-1>", lambda e: self._play_embedded_selected())
 
         self.ctx_menu = tk.Menu(self.root, tearoff=0)
-        self.ctx_menu.add_command(label="Avvia su Player (VLC / ffplay)", command=self._play_selected)
-        self.ctx_menu.add_command(label="Modifica Canale / Associa EPG...", command=self._open_edit_channel_dialog)
+        self.ctx_menu.add_command(label="▶  Riproduci nel Player Integrato", command=self._play_embedded_selected)
+        self.ctx_menu.add_command(label="⧉  Avvia su Player Esterno (VLC / ffplay)", command=self._play_selected)
+        self.ctx_menu.add_command(label="★  Aggiungi / Rimuovi dai Preferiti", command=self._toggle_favorite_selected)
+        self.ctx_menu.add_command(label="✏️  Modifica Canale / Associa EPG...", command=self._open_edit_channel_dialog)
         self.ctx_menu.add_separator()
-        self.ctx_menu.add_command(label="Registra Flusso Video Adesso...", command=self._start_recording_selected)
-        self.ctx_menu.add_command(label="Programma Timer da EPG...", command=self._open_epg_record_dialog)
-        self.ctx_menu.add_command(label="Ferma / Annulla Timer Canale", command=self._stop_recording_for_selected_channel)
-        self.ctx_menu.add_command(label="Mostra Guida EPG Canale", command=self._show_channel_epg_dialog)
+        self.ctx_menu.add_command(label="⬆  Sposta Canale Su", command=lambda: self._move_selected_channel(-1))
+        self.ctx_menu.add_command(label="⬇  Sposta Canale Giù", command=lambda: self._move_selected_channel(1))
         self.ctx_menu.add_separator()
-        self.ctx_menu.add_command(label="Copia URL flusso", command=self._copy_selected_url)
-        self.ctx_menu.add_command(label="Ricontrolla selezionati", command=self._recheck_selected)
-        self.ctx_menu.add_command(label="Rimuovi selezionati dalla lista", command=self._remove_selected)
+        self.ctx_menu.add_command(label="🔴  Registra Flusso Video Adesso...", command=self._start_recording_selected)
+        self.ctx_menu.add_command(label="⏰  Programma Timer da EPG...", command=self._open_epg_record_dialog)
+        self.ctx_menu.add_command(label="⏹  Ferma / Annulla Timer Canale", command=self._stop_recording_for_selected_channel)
+        self.ctx_menu.add_command(label="📅  Mostra Guida EPG Canale", command=self._show_channel_epg_dialog)
+        self.ctx_menu.add_separator()
+        self.ctx_menu.add_command(label="📋  Copia URL flusso", command=self._copy_selected_url)
+        self.ctx_menu.add_command(label="🔄  Ricontrolla selezionati", command=self._recheck_selected)
+        self.ctx_menu.add_command(label="🗑️  Rimuovi selezionati dalla lista", command=self._remove_selected)
         self.tree.bind("<Button-3>", self._show_context_menu)
 
-        # --- Barra Inferiore: Progresso, Play, Edit EPG, Timer, Multi-Registrazione ed Export ---
-        bottom_frame = ttk.Frame(main_frame)
-        bottom_frame.pack(fill=tk.X)
+        # --- Pannello Player Integrato ---
+        player_card = tk.Frame(split_pane, padx=10, pady=8, width=420)
+        self.card_frames.append(player_card)
+        split_pane.add(player_card, weight=2)
 
-        self.progress = ttk.Progressbar(bottom_frame, mode="determinate")
-        self.progress.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 6))
+        p_head = tk.Frame(player_card)
+        p_head.pack(fill=tk.X, pady=(0, 6))
 
-        self.play_btn = ttk.Button(
-            bottom_frame,
-            text="Riproduci",
-            command=self._play_selected,
+        self.embed_now_lbl = tk.Label(
+            p_head,
+            text="🎬 Player Integrato — Nessun flusso in riproduzione",
+            font=("Segoe UI", 9, "bold"),
+            anchor=tk.W,
         )
+        self.embed_now_lbl.pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+        self.video_stage = tk.Frame(player_card, bg="#050811", height=230)
+        self.video_stage.pack(fill=tk.BOTH, expand=True, pady=(0, 8))
+        self.video_stage.pack_propagate(False)
+        self.video_stage.bind("<Configure>", self._on_video_stage_resize)
+
+        self.video_placeholder_lbl = tk.Label(
+            self.video_stage,
+            text="Seleziona un canale e clicca '▶ Player' oppure fai doppio clic\n(richiede ffplay.exe disponibile o accanto a ffmpeg/player)",
+            bg="#050811",
+            fg="#94a3b8",
+            font=("Segoe UI", 9),
+            justify=tk.CENTER,
+        )
+        self.video_placeholder_lbl.place(relx=0.5, rely=0.5, anchor=tk.CENTER)
+
+        p_ctrl = tk.Frame(player_card)
+        p_ctrl.pack(fill=tk.X)
+
+        self.embed_play_btn = self._make_btn(
+            p_ctrl, "▶ Player", self._play_embedded_selected, kind="success", padx=9, pady=4
+        )
+        self.embed_play_btn.pack(side=tk.LEFT, padx=(0, 4))
+
+        self.embed_stop_btn = self._make_btn(
+            p_ctrl, "⏹ Stop", self._stop_embedded_player, kind="danger", state=tk.DISABLED, padx=9, pady=4
+        )
+        self.embed_stop_btn.pack(side=tk.LEFT, padx=(0, 6))
+
+        self.mute_btn = self._make_btn(
+            p_ctrl, "🔊", self._toggle_mute_embedded, kind="neutral", padx=7, pady=4
+        )
+        self.mute_btn.pack(side=tk.LEFT, padx=(0, 3))
+
+        self.volume_var = tk.IntVar(value=80)
+        self.vol_scale = tk.Scale(
+            p_ctrl,
+            from_=0,
+            to=100,
+            orient=tk.HORIZONTAL,
+            variable=self.volume_var,
+            showvalue=False,
+            length=75,
+            command=self._on_volume_change,
+        )
+        self.vol_scale.pack(side=tk.LEFT, padx=(0, 6))
+
+        self._make_btn(
+            p_ctrl, "⧉ Esterno", self._play_selected, kind="neutral", padx=8, pady=4
+        ).pack(side=tk.RIGHT)
+
+        # --- Card 4: Dock Azioni Inferiore ---
+        bottom_card = tk.Frame(main_frame, padx=12, pady=8)
+        bottom_card.pack(fill=tk.X)
+        self.card_frames.append(bottom_card)
+
+        self.progress = ttk.Progressbar(bottom_card, mode="determinate", style="Modern.Horizontal.TProgressbar")
+        self.progress.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 8))
+
+        self.play_btn = self._make_btn(bottom_card, "▶ Play Esterno", self._play_selected, kind="success", padx=9)
         self.play_btn.pack(side=tk.LEFT, padx=(0, 4))
 
-        self.edit_btn = ttk.Button(
-            bottom_frame,
-            text="Modifica / EPG",
-            command=self._open_edit_channel_dialog,
+        self._make_btn(bottom_card, "★", self._toggle_favorite_selected, kind="neutral", padx=8).pack(
+            side=tk.LEFT, padx=(0, 4)
         )
+        self._make_btn(bottom_card, "⬆", lambda: self._move_selected_channel(-1), kind="neutral", padx=7).pack(
+            side=tk.LEFT, padx=(0, 2)
+        )
+        self._make_btn(bottom_card, "⬇", lambda: self._move_selected_channel(1), kind="neutral", padx=7).pack(
+            side=tk.LEFT, padx=(0, 4)
+        )
+
+        self.edit_btn = self._make_btn(bottom_card, "✏️ Modifica / EPG", self._open_edit_channel_dialog, kind="neutral", padx=9)
         self.edit_btn.pack(side=tk.LEFT, padx=(0, 8))
 
-        ttk.Label(bottom_frame, text="Min (0=∞):").pack(side=tk.LEFT, padx=(0, 3))
+        ttk.Label(bottom_card, text="Min (0=∞):").pack(side=tk.LEFT, padx=(0, 3))
         self.rec_minutes_var = tk.IntVar(value=0)
         self.rec_minutes_spin = ttk.Spinbox(
-            bottom_frame,
+            bottom_card,
             from_=0,
             to=1440,
             width=4,
@@ -430,41 +1108,380 @@ class IPTVCheckerApp:
         )
         self.rec_minutes_spin.pack(side=tk.LEFT, padx=(0, 5))
 
-        self.rec_btn = ttk.Button(
-            bottom_frame,
-            text="Registra Video",
-            command=self._start_recording_selected,
-        )
+        self.rec_btn = self._make_btn(bottom_card, "🔴 Registra", self._start_recording_selected, kind="danger", padx=9)
         self.rec_btn.pack(side=tk.LEFT, padx=(0, 4))
 
-        self.rec_epg_btn = ttk.Button(
-            bottom_frame,
-            text="Registra da EPG...",
-            command=self._open_epg_record_dialog,
+        self.rec_epg_btn = self._make_btn(
+            bottom_card, "⏰ Reg. da EPG...", self._open_epg_record_dialog, kind="warning", padx=9
         )
         self.rec_epg_btn.pack(side=tk.LEFT, padx=(0, 4))
 
-        self.stop_rec_btn = ttk.Button(
-            bottom_frame,
-            text="Timer / Reg. (0)",
+        self.stop_rec_btn = self._make_btn(
+            bottom_card,
+            "Timer / Reg. (0)",
+            self._on_stop_rec_button_click,
+            kind="neutral",
             state=tk.DISABLED,
-            command=self._on_stop_rec_button_click,
+            padx=9,
         )
         self.stop_rec_btn.pack(side=tk.LEFT, padx=(0, 8))
 
-        self.export_online_btn = ttk.Button(
-            bottom_frame,
-            text="Esporta M3U Pulita",
-            command=lambda: self._export_m3u(only_online=True),
+        self.export_online_btn = self._make_btn(
+            bottom_card,
+            "💾 Esporta M3U Pulita",
+            lambda: self._export_m3u(mode="online"),
+            kind="accent",
+            padx=10,
         )
         self.export_online_btn.pack(side=tk.RIGHT)
 
-        self.export_all_btn = ttk.Button(
-            bottom_frame,
-            text="Esporta Vista (.m3u)",
-            command=lambda: self._export_m3u(only_online=False),
+        self.export_epg_btn = self._make_btn(
+            bottom_card,
+            "🗓️ Esporta Con EPG",
+            lambda: self._export_m3u(mode="epg"),
+            kind="neutral",
+            padx=9,
+        )
+        self.export_epg_btn.pack(side=tk.RIGHT, padx=(0, 4))
+
+        self.export_all_btn = self._make_btn(
+            bottom_card,
+            "Esporta Vista",
+            lambda: self._export_m3u(mode="view"),
+            kind="neutral",
+            padx=9,
         )
         self.export_all_btn.pack(side=tk.RIGHT, padx=(0, 4))
+
+    # --- Player Integrato (ffplay embedded + Win32 SetParent) ---
+    def _find_ffplay_for_embed(self):
+        ffp = self._find_binary("ffplay.exe")
+        if ffp:
+            return ffp
+        if self.player_type_var.get() == "ffplay":
+            cand = self.player_exe_var.get().strip()
+            if cand and os.path.isfile(cand):
+                return cand
+        return ""
+
+    def _attach_win32_child_window(self, parent_hwnd, w, h):
+        if os.name != "nt" or not parent_hwnd:
+            return None
+        try:
+            user32 = ctypes.windll.user32
+            enum_proc = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
+            found = []
+
+            def callback(hwnd, _lparam):
+                if user32.IsWindowVisible(hwnd):
+                    pid = ctypes.c_ulong()
+                    user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+                    if self.embed_proc and pid.value == self.embed_proc.pid:
+                        found.append(hwnd)
+                return True
+
+            for _ in range(12):
+                found.clear()
+                user32.EnumWindows(enum_proc(callback), 0)
+                if found:
+                    child_hwnd = found[0]
+                    user32.SetParent(child_hwnd, parent_hwnd)
+                    user32.MoveWindow(child_hwnd, 0, 0, max(100, int(w)), max(80, int(h)), True)
+                    return child_hwnd
+                time.sleep(0.12)
+        except Exception:
+            pass
+        return None
+
+    def _on_video_stage_resize(self, event):
+        if os.name != "nt" or not self.embed_hwnd:
+            return
+        try:
+            w = max(100, int(event.width))
+            h = max(80, int(event.height))
+            ctypes.windll.user32.MoveWindow(self.embed_hwnd, 0, 0, w, h, True)
+        except Exception:
+            pass
+
+    def _toggle_mute_embedded(self):
+        self.embed_muted = not self.embed_muted
+        self.mute_btn.config(text="🔇" if self.embed_muted else "🔊")
+        if self.embed_proc and self.embed_proc.poll() is None and self.embed_channel_name:
+            sel = self._get_selected_channels()
+            if sel:
+                self._launch_embedded_stream(sel[0])
+
+    def _on_volume_change(self, _val):
+        if self.embed_muted and int(self.volume_var.get()) > 0:
+            self.embed_muted = False
+            self.mute_btn.config(text="🔊")
+
+    def _play_embedded_selected(self):
+        sel = self._get_selected_channels()
+        if not sel:
+            messagebox.showinfo("Nessuna selezione", "Seleziona un canale nella tabella per riprodurlo nel player.")
+            return
+        ch = sel[0]
+        if ch["status"] == "OFFLINE":
+            if not messagebox.askyesno(
+                "Canale segnato OFFLINE",
+                f"Il canale '{ch['name']}' risulta OFFLINE dall'ultimo controllo.\nVuoi provare comunque ad avviarlo nel player?",
+            ):
+                return
+        self._launch_embedded_stream(ch)
+
+    def _launch_embedded_stream(self, ch):
+        ffplay_exe = self._find_ffplay_for_embed()
+        if not ffplay_exe:
+            messagebox.showwarning(
+                "ffplay non trovato",
+                "Per usare il player integrato serve ffplay.exe (in PATH, nella cartella del programma o in C:\\ffmpeg\\bin).\n"
+                "In alternativa puoi cliccare '⧉ Esterno' per aprire il flusso su VLC.",
+            )
+            return
+
+        self._stop_embedded_player(clear_label=False)
+        self.root.update_idletasks()
+
+        wid = self.video_stage.winfo_id()
+        w = max(200, self.video_stage.winfo_width())
+        h = max(140, self.video_stage.winfo_height())
+
+        ua = ch["ua"] or self.default_ua
+        referer = ch["referer"]
+        vol = 0 if self.embed_muted else max(0, min(100, int(self.volume_var.get())))
+
+        cmd = [
+            ffplay_exe,
+            "-noborder",
+            "-x",
+            str(w),
+            "-y",
+            str(h),
+            "-volume",
+            str(vol),
+            "-fflags",
+            "nobuffer",
+            "-flags",
+            "low_delay",
+            "-loglevel",
+            "error",
+        ]
+        if ua:
+            cmd.extend(["-user_agent", ua])
+        if referer:
+            cmd.extend(["-headers", f"Referer: {referer}\r\n"])
+        cmd.append(ch["url"])
+
+        env = os.environ.copy()
+        if os.name == "nt":
+            env["SDL_WINDOWID"] = str(wid)
+            env["SDL_VIDEODRIVER"] = "windows"
+
+        creationflags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+        try:
+            self.embed_proc = subprocess.Popen(
+                cmd,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                env=env,
+                creationflags=creationflags,
+            )
+            self.embed_channel_name = ch["name"]
+            self.video_placeholder_lbl.place_forget()
+            self.embed_now_lbl.config(text=f"▶ In onda: {ch['name']}")
+            self.embed_stop_btn.config(state=tk.NORMAL)
+            self._style_single_button(self.embed_stop_btn)
+
+            if os.name == "nt":
+                threading.Thread(
+                    target=self._attach_win32_worker,
+                    args=(wid, w, h),
+                    daemon=True,
+                ).start()
+
+            if not self.embed_poll_scheduled:
+                self.embed_poll_scheduled = True
+                self.root.after(400, self._poll_embedded_player)
+        except Exception as e:
+            messagebox.showerror("Errore Player Integrato", f"Impossibile avviare il player integrato:\n{e}")
+            self._stop_embedded_player()
+
+    def _attach_win32_worker(self, parent_hwnd, w, h):
+        child = self._attach_win32_child_window(parent_hwnd, w, h)
+        if child and self.embed_proc and self.embed_proc.poll() is None:
+            self.embed_hwnd = child
+
+    def _poll_embedded_player(self):
+        if self.embed_proc is None:
+            self.embed_poll_scheduled = False
+            return
+        if self.embed_proc.poll() is not None:
+            self._stop_embedded_player()
+            return
+        self.root.after(400, self._poll_embedded_player)
+
+    def _stop_embedded_player(self, clear_label=True):
+        self.embed_poll_scheduled = False
+        self.embed_hwnd = None
+        proc = self.embed_proc
+        self.embed_proc = None
+        if proc is not None and proc.poll() is None:
+            try:
+                proc.terminate()
+                proc.wait(timeout=1.5)
+            except Exception:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+        if clear_label:
+            self.embed_channel_name = ""
+            self.embed_now_lbl.config(text="🎬 Player Integrato — Nessun flusso in riproduzione")
+            self.video_placeholder_lbl.place(relx=0.5, rely=0.5, anchor=tk.CENTER)
+            self.embed_stop_btn.config(state=tk.DISABLED)
+            self._style_single_button(self.embed_stop_btn)
+
+    # --- Caricamento rapido Lista Seca ---
+    def _load_seca_list(self):
+        self.file_path_var.set(SECA_M3U_URL)
+        self._load_m3u_from_url(silent=False)
+
+    # --- Preferiti, Riordino Scaletta, Ripristino Ordine & Rimozione Duplicati ---
+    def _toggle_favorite_selected(self):
+        sel = self._get_selected_channels()
+        if not sel:
+            return
+        target_state = not all(ch.get("favorite", False) for ch in sel)
+        for ch in sel:
+            ch["favorite"] = target_state
+        self._refresh_tree()
+        self._update_stats()
+
+    def _move_selected_channel(self, direction):
+        if self.is_running:
+            return
+        sel = self._get_selected_channels()
+        if len(sel) != 1:
+            messagebox.showinfo("Selezione singola", "Seleziona un solo canale per spostarlo su o giù nella scaletta.")
+            return
+        ch = sel[0]
+        pos = self.channels.index(ch)
+        new_pos = pos + direction
+        if new_pos < 0 or new_pos >= len(self.channels):
+            return
+        self.channels[pos], self.channels[new_pos] = self.channels[new_pos], self.channels[pos]
+        for i, item in enumerate(self.channels, start=1):
+            item["idx"] = i
+        self._refresh_tree()
+        iid = str(ch["uid"])
+        if self.tree.exists(iid):
+            self.tree.selection_set(iid)
+            self.tree.see(iid)
+
+    def _restore_original_order(self):
+        if self.is_running or not self.channels:
+            return
+        self.channels.sort(key=lambda c: c.get("orig_idx", c["idx"]))
+        for i, ch in enumerate(self.channels, start=1):
+            ch["idx"] = i
+        self._refresh_tree()
+        self._update_stats()
+
+    def _recheck_offline_channels(self):
+        if self.is_running:
+            return
+        offline_chs = [ch for ch in self.channels if ch["status"] == "OFFLINE"]
+        if not offline_chs:
+            messagebox.showinfo("Nessun canale OFFLINE", "Non ci sono canali segnati come OFFLINE da ricontrollare.")
+            return
+        self._start_check(subset=offline_chs)
+
+    def _remove_duplicates(self):
+        if self.is_running:
+            return
+        if not self.channels:
+            return
+        seen_urls = set()
+        seen_names = set()
+        removed = 0
+
+        ordered = sorted(
+            self.channels,
+            key=lambda c: (
+                0 if c.get("favorite") else 1,
+                0 if c["status"] == "ONLINE" else 1,
+            ),
+        )
+        kept_ids = set()
+        for ch in ordered:
+            u_key = ch["url"].strip()
+            n_key = normalize_key(ch["name"])
+            if u_key in seen_urls or (n_key and n_key in seen_names):
+                removed += 1
+                continue
+            seen_urls.add(u_key)
+            if n_key:
+                seen_names.add(n_key)
+            kept_ids.add(ch["uid"])
+
+        if removed == 0:
+            messagebox.showinfo("Nessun duplicato", "Non sono stati trovati canali duplicati nella lista.")
+            return
+
+        if not messagebox.askyesno(
+            "Rimuovi Duplicati",
+            f"Trovati {removed} canali duplicati (stesso URL o stesso nome).\nVuoi eliminarli mantenendo i migliori?",
+        ):
+            return
+
+        self.channels = [ch for ch in self.channels if ch["uid"] in kept_ids]
+        for i, ch in enumerate(self.channels, start=1):
+            ch["idx"] = i
+        self._update_country_filter_options()
+        self._refresh_tree()
+        self._update_stats()
+
+    # --- Auto-Abbinamento Intelligente EPG ---
+    def _auto_match_epg_smart(self):
+        if not self.epg_channels:
+            messagebox.showinfo("EPG non caricata", "Carica prima una guida XMLTV nella barra 'EPG XMLTV' in alto.")
+            return
+        if not self.channels:
+            return
+
+        matched_before = sum(1 for c in self.channels if c.get("epg_matched_id"))
+        self._match_channels_with_epg(use_smart_fallback=True)
+        matched_after = sum(1 for c in self.channels if c.get("epg_matched_id"))
+        self._refresh_tree()
+        self._update_stats()
+        diff = max(0, matched_after - matched_before)
+        messagebox.showinfo(
+            "Auto-Abbinamento EPG",
+            f"Abbinamento automatico completato!\n"
+            f"- Nuovi canali associati: {diff}\n"
+            f"- Totale canali con EPG attiva: {matched_after} su {len(self.channels)}",
+        )
+
+    # --- Cartella Registrazioni Predefinita ---
+    def _browse_rec_folder(self):
+        folder = filedialog.askdirectory(title="Seleziona cartella predefinita per le registrazioni")
+        if folder:
+            self.rec_folder_var.set(folder)
+            self._save_config()
+
+    def _open_rec_folder(self):
+        folder = self.rec_folder_var.get().strip() or get_app_base_dir()
+        if not os.path.isdir(folder):
+            messagebox.showwarning("Cartella non trovata", f"La cartella non esiste:\n{folder}")
+            return
+        try:
+            if os.name == "nt":
+                os.startfile(folder)
+            else:
+                subprocess.Popen(["xdg-open", folder])
+        except Exception as e:
+            messagebox.showerror("Errore apertura cartella", f"Impossibile aprire la cartella:\n{e}")
 
     # --- Finestra Editor Canale & Associazione Manuale EPG ---
     def _open_edit_channel_dialog(self):
@@ -519,7 +1536,6 @@ class IPTVCheckerApp:
         ttk.Label(r4, text="Referer:", width=14).pack(side=tk.LEFT)
         ttk.Entry(r4, textvariable=ref_var).pack(side=tk.LEFT, fill=tk.X, expand=True)
 
-        # --- Sezione Associazione Guida EPG ---
         epg_frame = ttk.LabelFrame(
             win,
             text="Associa Canale alla Guida EPG XMLTV (clicca su un canale per impostare tvg-id)",
@@ -531,8 +1547,7 @@ class IPTVCheckerApp:
         search_row.pack(fill=tk.X, pady=(0, 6))
         ttk.Label(search_row, text="Cerca nella guida EPG:").pack(side=tk.LEFT, padx=(0, 6))
         search_var = tk.StringVar()
-        search_entry = ttk.Entry(search_row, textvariable=search_var)
-        search_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 6))
+        ttk.Entry(search_row, textvariable=search_var).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 6))
 
         def prefill_search():
             search_var.set(name_var.get().strip())
@@ -626,28 +1641,85 @@ class IPTVCheckerApp:
         ttk.Button(btn_row, text="Salva Modifiche", command=on_save).pack(side=tk.RIGHT)
         ttk.Button(btn_row, text="Annulla", command=win.destroy).pack(side=tk.RIGHT, padx=(0, 6))
 
-    # --- Ricerca eseguibile ffmpeg / vlc ---
-    def _find_ffmpeg(self):
-        ff = shutil.which("ffmpeg")
-        if ff and os.path.isfile(ff):
-            return ff
+    # --- Ricerca eseguibili ffmpeg / ffprobe / ffplay ---
+    def _find_binary(self, exe_name):
+        found = shutil.which(exe_name.replace(".exe", ""))
+        if found and os.path.isfile(found):
+            return found
         player_exe = self.player_exe_var.get().strip()
         if player_exe:
             folder = os.path.dirname(player_exe)
-            cand = os.path.join(folder, "ffmpeg.exe")
+            cand = os.path.join(folder, exe_name)
             if os.path.isfile(cand):
                 return cand
-        base_dir = os.path.dirname(os.path.abspath(__file__))
-        local_ff = os.path.join(base_dir, "ffmpeg.exe")
-        if os.path.isfile(local_ff):
-            return local_ff
+        base_dir = get_app_base_dir()
+        local_bin = os.path.join(base_dir, exe_name)
+        if os.path.isfile(local_bin):
+            return local_bin
         for path in [
-            r"C:\ffmpeg\bin\ffmpeg.exe",
-            r"C:\Program Files\ffmpeg\bin\ffmpeg.exe",
-            r"C:\Program Files (x86)\ffmpeg\bin\ffmpeg.exe",
+            rf"C:\ffmpeg\bin\{exe_name}",
+            rf"C:\Program Files\ffmpeg\bin\{exe_name}",
+            rf"C:\Program Files (x86)\ffmpeg\bin\{exe_name}",
         ]:
             if os.path.isfile(path):
                 return path
+        return ""
+
+    def _find_ffmpeg(self):
+        return self._find_binary("ffmpeg.exe")
+
+    def _find_ffprobe(self):
+        return self._find_binary("ffprobe.exe")
+
+    def _refresh_ffmpeg_badge(self):
+        ff = self._find_ffmpeg()
+        if ff:
+            self.ffmpeg_badge.config(text="✔ ffmpeg: PRONTO", bg="#16a34a", fg="#ffffff")
+        else:
+            self.ffmpeg_badge.config(text="⚠ Fallback HLS (no ffmpeg)", bg="#d97706", fg="#ffffff")
+
+    def _probe_stream_resolution(self, url, ua, referer, timeout):
+        ffprobe = self._find_ffprobe()
+        if not ffprobe:
+            return ""
+        cmd = [
+            ffprobe,
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=height",
+            "-of",
+            "csv=p=0",
+        ]
+        if ua:
+            cmd.extend(["-user_agent", ua])
+        if referer:
+            cmd.extend(["-headers", f"Referer: {referer}\r\n"])
+        cmd.append(url)
+        with self.ffprobe_semaphore:
+            if self.stop_requested:
+                return ""
+            try:
+                creationflags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+                res = subprocess.run(
+                    cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL,
+                    timeout=max(4, timeout + 2),
+                    creationflags=creationflags,
+                )
+                out = (res.stdout or b"").decode("utf-8", errors="ignore").strip()
+                for line in out.splitlines():
+                    if line.strip().isdigit():
+                        h = int(line.strip())
+                        if h >= 2160:
+                            return "4K (2160p)"
+                        if h > 0:
+                            return f"{h}p"
+            except Exception:
+                pass
         return ""
 
     def _get_current_epg_program(self, ch):
@@ -660,11 +1732,11 @@ class IPTVCheckerApp:
                 return (start_dt, stop_dt, title, desc)
         return None
 
-    def _get_channel_rec_state(self, ch_idx):
+    def _get_channel_rec_state(self, ch_uid):
         has_rec = False
         has_wait = False
         for rec in self.active_recordings.values():
-            if rec["ch_idx"] == ch_idx:
+            if rec["ch_uid"] == ch_uid:
                 if rec["state"] == "RECORDING":
                     has_rec = True
                 elif rec["state"] == "WAITING":
@@ -722,8 +1794,8 @@ class IPTVCheckerApp:
         epg_tree.column("time", width=145, anchor=tk.CENTER, stretch=False)
         epg_tree.column("duration", width=155, anchor=tk.CENTER, stretch=False)
         epg_tree.column("title", width=310, anchor=tk.W)
-        epg_tree.tag_configure("NOW", foreground="#137333")
-        epg_tree.tag_configure("FUTURE", foreground="#1a73e8")
+        epg_tree.tag_configure("NOW", foreground="#16a34a")
+        epg_tree.tag_configure("FUTURE", foreground="#2563eb")
         epg_tree.pack(fill=tk.BOTH, expand=True, padx=10, pady=(0, 8))
 
         item_map = {}
@@ -861,23 +1933,27 @@ class IPTVCheckerApp:
         timer_part = f"_{mins}min" if mins > 0 else ""
         default_name = f"{ch_part}{epg_part}_{ts}{timer_part}.ts"
 
-        dialog_title = (
-            f"Salva registrazione programmata - {ch['name']}"
-            if scheduled_start_ts is not None
-            else f"Salva registrazione - {ch['name']}"
-        )
-        out_path = filedialog.asksaveasfilename(
-            title=dialog_title,
-            defaultextension=".ts",
-            initialfile=default_name,
-            filetypes=[
-                ("Transport Stream Video (*.ts)", "*.ts"),
-                ("Video MP4 (*.mp4)", "*.mp4"),
-                ("Tutti i file", "*.*"),
-            ],
-        )
-        if not out_path:
-            return
+        rec_dir = self.rec_folder_var.get().strip()
+        if rec_dir and os.path.isdir(rec_dir):
+            out_path = os.path.join(rec_dir, default_name)
+        else:
+            dialog_title = (
+                f"Salva registrazione programmata - {ch['name']}"
+                if scheduled_start_ts is not None
+                else f"Salva registrazione - {ch['name']}"
+            )
+            out_path = filedialog.asksaveasfilename(
+                title=dialog_title,
+                defaultextension=".ts",
+                initialfile=default_name,
+                filetypes=[
+                    ("Transport Stream Video (*.ts)", "*.ts"),
+                    ("Video MP4 (*.mp4)", "*.mp4"),
+                    ("Tutti i file", "*.*"),
+                ],
+            )
+            if not out_path:
+                return
 
         if any(os.path.abspath(r["file_path"]) == os.path.abspath(out_path) for r in self.active_recordings.values()):
             messagebox.showwarning("File in uso", "Questo file è già utilizzato da un'altra registrazione o timer attivo.")
@@ -890,7 +1966,7 @@ class IPTVCheckerApp:
         rec_id = self.rec_counter
         rec_info = {
             "id": rec_id,
-            "ch_idx": ch["idx"],
+            "ch_uid": ch["uid"],
             "channel_name": ch["name"],
             "prog_title": prog_title,
             "file_path": out_path,
@@ -928,12 +2004,12 @@ class IPTVCheckerApp:
                 f"Canale: {ch['name']}\n"
                 f"Programma: {prog_title or 'N/D'}\n"
                 f"Avvio automatico: {start_lbl}\n"
-                f"Durata impostata: {mins} minuti\n\n"
+                f"Durata impostata: {mins} minuti\n"
+                f"File: {out_path}\n\n"
                 f"Lascia aperto il programma: la registrazione partirà e si fermerà automaticamente.",
             )
 
     def _download_hls_loop_fallback(self, rec_info, url, headers, out_path, deadline):
-        """Fallback puro Python per flussi HLS (.m3u8) quando ffmpeg non è presente sul PC."""
         stop_ev = rec_info["stop_event"]
         seen_segments = []
         seen_set = set()
@@ -1034,7 +2110,7 @@ class IPTVCheckerApp:
                     return
                 rec_info["state"] = "RECORDING"
                 rec_info["start_time"] = time.time()
-                self.root.after(0, self._on_scheduled_recording_started, rec_info["ch_idx"])
+                self.root.after(0, self._on_scheduled_recording_started, rec_info["ch_uid"])
 
             deadline = (rec_info["start_time"] + limit_seconds) if limit_seconds > 0 else None
 
@@ -1112,9 +2188,9 @@ class IPTVCheckerApp:
         finally:
             self.root.after(0, self._on_recording_finished, rec_info["id"], err_msg)
 
-    def _on_scheduled_recording_started(self, ch_idx):
+    def _on_scheduled_recording_started(self, ch_uid):
         for ch in self.channels:
-            if ch["idx"] == ch_idx:
+            if ch["uid"] == ch_uid:
                 self._update_channel_row_visual(ch)
                 break
         self._update_rec_controls_ui()
@@ -1135,8 +2211,8 @@ class IPTVCheckerApp:
         sel = self._get_selected_channels()
         if not sel:
             return
-        ch_idx = sel[0]["idx"]
-        matching = [rec_id for rec_id, r in self.active_recordings.items() if r["ch_idx"] == ch_idx]
+        ch_uid = sel[0]["uid"]
+        matching = [rec_id for rec_id, r in self.active_recordings.items() if r["ch_uid"] == ch_uid]
         if not matching:
             messagebox.showinfo("Nessun timer o registrazione", f"Nessun timer o registrazione attiva per '{sel[0]['name']}'.")
             return
@@ -1187,8 +2263,8 @@ class IPTVCheckerApp:
         rtree.column("time", width=155, anchor=tk.CENTER, stretch=False)
         rtree.column("size", width=80, anchor=tk.CENTER, stretch=False)
         rtree.column("file", width=140, anchor=tk.W)
-        rtree.tag_configure("RECORDING", foreground="#b06000")
-        rtree.tag_configure("WAITING", foreground="#1a73e8")
+        rtree.tag_configure("RECORDING", foreground="#d97706")
+        rtree.tag_configure("WAITING", foreground="#2563eb")
         rtree.pack(fill=tk.BOTH, expand=True, padx=10, pady=(0, 8))
         self.rec_manager_tree = rtree
 
@@ -1263,13 +2339,17 @@ class IPTVCheckerApp:
     def _update_rec_controls_ui(self):
         count = len(self.active_recordings)
         if count == 0:
+            self.stop_rec_btn._btn_kind = "neutral"
             self.stop_rec_btn.config(text="Timer / Reg. (0)", state=tk.DISABLED)
         elif count == 1:
             rec = next(iter(self.active_recordings.values()))
-            lbl = "Annulla Timer (1)" if rec["state"] == "WAITING" else "Ferma Reg. (1)"
+            lbl = "Annulla Timer (1)" if rec["state"] == "WAITING" else "⏹ Ferma Reg. (1)"
+            self.stop_rec_btn._btn_kind = "warning"
             self.stop_rec_btn.config(text=lbl, state=tk.NORMAL)
         else:
-            self.stop_rec_btn.config(text=f"Timer / Reg. ({count})", state=tk.NORMAL)
+            self.stop_rec_btn._btn_kind = "warning"
+            self.stop_rec_btn.config(text=f"📋 Timer / Reg. ({count})", state=tk.NORMAL)
+        self._style_single_button(self.stop_rec_btn)
 
     def _poll_recording_status(self):
         if not self.active_recordings:
@@ -1302,7 +2382,7 @@ class IPTVCheckerApp:
             return
 
         for ch in self.channels:
-            if ch["idx"] == rec["ch_idx"]:
+            if ch["uid"] == rec["ch_uid"]:
                 self._update_channel_row_visual(ch)
                 break
 
@@ -1345,6 +2425,7 @@ class IPTVCheckerApp:
             )
 
     def _on_close(self):
+        self._stop_embedded_player(clear_label=False)
         if self.active_recordings:
             n = len(self.active_recordings)
             if not messagebox.askyesno(
@@ -1360,10 +2441,11 @@ class IPTVCheckerApp:
                         proc.terminate()
                     except Exception:
                         pass
+        self._save_config()
         self.stop_requested = True
         self.root.destroy()
 
-    # --- Gestione EPG XMLTV ---
+    # --- Gestione EPG XMLTV (Singola o Multi-URL) ---
     def _browse_epg_file(self):
         path = filedialog.askopenfilename(
             title="Seleziona file EPG XMLTV",
@@ -1371,94 +2453,133 @@ class IPTVCheckerApp:
         )
         if path:
             self.epg_source_var.set(path)
-            self._start_epg_load()
+            self._start_epg_load(silent=False)
 
-    def _start_epg_load(self):
-        src = self.epg_source_var.get().strip()
-        if not src:
-            messagebox.showwarning("EPG mancante", "Inserisci un URL XMLTV oppure seleziona un file .xml / .xml.gz locale.")
+    def _split_epg_sources(self, raw_src):
+        if not raw_src:
+            return []
+        if os.path.isfile(raw_src.strip()):
+            return [raw_src.strip()]
+        parts = [p.strip() for p in re.split(r"[,;\n]+", raw_src) if p.strip()]
+        return parts
+
+    def _start_epg_load(self, silent=False):
+        raw_src = self.epg_source_var.get().strip()
+        sources = self._split_epg_sources(raw_src)
+        if not sources:
+            if not silent:
+                messagebox.showwarning(
+                    "EPG mancante",
+                    "Inserisci uno o più URL XMLTV (separati da virgola) oppure seleziona un file .xml / .xml.gz locale.",
+                )
             return
 
         self.load_epg_btn.config(state=tk.DISABLED)
-        thread = threading.Thread(target=self._epg_worker, args=(src,), daemon=True)
+        self._style_single_button(self.load_epg_btn)
+        thread = threading.Thread(target=self._epg_worker, args=(sources, silent), daemon=True)
         thread.start()
 
-    def _epg_worker(self, src):
-        err = None
+    def _epg_worker(self, sources, silent):
+        errors = []
         epg_channels = {}
         epg_name_to_id = {}
+        epg_smart_to_id = {}
         epg_programmes = {}
 
-        try:
-            if src.lower().startswith(("http://", "https://")):
-                req = urllib.request.Request(src, headers={"User-Agent": self.default_ua})
-                with urllib.request.urlopen(req, timeout=20, context=self.ssl_ctx) as resp:
-                    raw_bytes = resp.read()
-            else:
-                with open(src, "rb") as f:
-                    raw_bytes = f.read()
+        for src in sources:
+            try:
+                if src.lower().startswith(("http://", "https://")):
+                    req = urllib.request.Request(src, headers={"User-Agent": self.default_ua})
+                    with urllib.request.urlopen(req, timeout=25, context=self.ssl_ctx) as resp:
+                        raw_bytes = resp.read()
+                else:
+                    with open(src, "rb") as f:
+                        raw_bytes = f.read()
 
-            if raw_bytes[:2] == b"\x1f\x8b" or src.lower().endswith(".gz"):
-                xml_bytes = gzip.decompress(raw_bytes)
-            else:
-                xml_bytes = raw_bytes
+                if raw_bytes[:2] == b"\x1f\x8b" or src.lower().endswith(".gz"):
+                    xml_bytes = gzip.decompress(raw_bytes)
+                else:
+                    xml_bytes = raw_bytes
 
-            root_xml = ET.fromstring(xml_bytes)
+                root_xml = ET.fromstring(xml_bytes)
 
-            for ch_el in root_xml.findall("channel"):
-                cid = (ch_el.get("id") or "").strip()
-                if not cid:
-                    continue
-                disp_names = [dn.text.strip() for dn in ch_el.findall("display-name") if dn.text and dn.text.strip()]
-                label = disp_names[0] if disp_names else cid
-                epg_channels[cid] = label
-                epg_name_to_id[normalize_key(cid)] = cid
-                for dn in disp_names:
-                    epg_name_to_id[normalize_key(dn)] = cid
+                for ch_el in root_xml.findall("channel"):
+                    cid = (ch_el.get("id") or "").strip()
+                    if not cid:
+                        continue
+                    disp_names = [
+                        dn.text.strip() for dn in ch_el.findall("display-name") if dn.text and dn.text.strip()
+                    ]
+                    label = disp_names[0] if disp_names else cid
+                    if cid not in epg_channels:
+                        epg_channels[cid] = label
+                    epg_name_to_id.setdefault(normalize_key(cid), cid)
+                    sk_cid = smart_channel_key(cid)
+                    if sk_cid:
+                        epg_smart_to_id.setdefault(sk_cid, cid)
+                    for dn in disp_names:
+                        epg_name_to_id.setdefault(normalize_key(dn), cid)
+                        sk_dn = smart_channel_key(dn)
+                        if sk_dn:
+                            epg_smart_to_id.setdefault(sk_dn, cid)
 
-            for prog_el in root_xml.findall("programme"):
-                cid = (prog_el.get("channel") or "").strip()
-                if not cid:
-                    continue
-                start_dt = parse_xmltv_datetime(prog_el.get("start"))
-                stop_dt = parse_xmltv_datetime(prog_el.get("stop"))
-                title_el = prog_el.find("title")
-                desc_el = prog_el.find("desc")
-                title = title_el.text.strip() if (title_el is not None and title_el.text) else "Senza titolo"
-                desc = desc_el.text.strip() if (desc_el is not None and desc_el.text) else ""
-                epg_programmes.setdefault(cid, []).append((start_dt, stop_dt, title, desc))
+                for prog_el in root_xml.findall("programme"):
+                    cid = (prog_el.get("channel") or "").strip()
+                    if not cid:
+                        continue
+                    start_dt = parse_xmltv_datetime(prog_el.get("start"))
+                    stop_dt = parse_xmltv_datetime(prog_el.get("stop"))
+                    title_el = prog_el.find("title")
+                    desc_el = prog_el.find("desc")
+                    title = title_el.text.strip() if (title_el is not None and title_el.text) else "Senza titolo"
+                    desc = desc_el.text.strip() if (desc_el is not None and desc_el.text) else ""
+                    epg_programmes.setdefault(cid, []).append((start_dt, stop_dt, title, desc))
+            except Exception as e:
+                errors.append(f"{src}: {e}")
 
-            for cid in epg_programmes:
-                epg_programmes[cid].sort(key=lambda x: x[0] or datetime.min.replace(tzinfo=timezone.utc))
+        for cid in epg_programmes:
+            epg_programmes[cid].sort(key=lambda x: x[0] or datetime.min.replace(tzinfo=timezone.utc))
 
-        except Exception as e:
-            err = str(e)
+        err_text = "\n".join(errors) if errors else None
+        self.root.after(
+            0,
+            self._on_epg_loaded,
+            epg_channels,
+            epg_name_to_id,
+            epg_smart_to_id,
+            epg_programmes,
+            err_text,
+            silent,
+        )
 
-        self.root.after(0, self._on_epg_loaded, epg_channels, epg_name_to_id, epg_programmes, err)
-
-    def _on_epg_loaded(self, epg_channels, epg_name_to_id, epg_programmes, err):
+    def _on_epg_loaded(self, epg_channels, epg_name_to_id, epg_smart_to_id, epg_programmes, err, silent):
         self.load_epg_btn.config(state=tk.NORMAL)
-        if err:
-            messagebox.showerror("Errore caricamento EPG", f"Impossibile caricare o analizzare la guida EPG:\n{err}")
+        self._style_single_button(self.load_epg_btn)
+        if err and not epg_channels:
+            if not silent:
+                messagebox.showerror("Errore caricamento EPG", f"Impossibile caricare o analizzare le guide EPG:\n{err}")
             return
 
         self.epg_channels = epg_channels
         self.epg_name_to_id = epg_name_to_id
+        self.epg_smart_to_id = epg_smart_to_id
         self.epg_programmes = epg_programmes
 
-        self._match_channels_with_epg()
+        self._match_channels_with_epg(use_smart_fallback=True)
         self._refresh_tree()
         self._update_stats()
 
-        tot_progs = sum(len(v) for v in epg_programmes.values())
-        messagebox.showinfo(
-            "EPG Caricata",
-            f"Guida XMLTV caricata con successo!\n"
-            f"- Canali nella guida: {len(epg_channels)}\n"
-            f"- Eventi / programmi letti: {tot_progs}",
-        )
+        if not silent:
+            tot_progs = sum(len(v) for v in epg_programmes.values())
+            warn_part = f"\n\nAvvisi su alcune sorgenti:\n{err}" if err else ""
+            messagebox.showinfo(
+                "EPG Caricata",
+                f"Guide XMLTV caricate con successo!\n"
+                f"- Canali nella guida: {len(epg_channels)}\n"
+                f"- Eventi / programmi letti: {tot_progs}{warn_part}",
+            )
 
-    def _match_channels_with_epg(self):
+    def _match_channels_with_epg(self, use_smart_fallback=False):
         now = datetime.now().astimezone()
         for ch in self.channels:
             matched_id = None
@@ -1473,6 +2594,12 @@ class IPTVCheckerApp:
                 matched_id = self.epg_name_to_id[normalize_key(tvg_name)]
             elif normalize_key(ch["name"]) in self.epg_name_to_id:
                 matched_id = self.epg_name_to_id[normalize_key(ch["name"])]
+            elif use_smart_fallback:
+                sk = smart_channel_key(ch["name"])
+                if sk and sk in self.epg_smart_to_id:
+                    matched_id = self.epg_smart_to_id[sk]
+                    if not ch.get("tvg_id"):
+                        ch["tvg_id"] = matched_id
 
             ch["epg_matched_id"] = matched_id
             if not matched_id:
@@ -1481,15 +2608,23 @@ class IPTVCheckerApp:
 
             progs = self.epg_programmes.get(matched_id, [])
             current_prog = None
+            next_prog = None
             for start_dt, stop_dt, title, _ in progs:
-                if start_dt and stop_dt and start_dt <= now <= stop_dt:
+                if start_dt and stop_dt and start_dt <= now <= stop_dt and current_prog is None:
                     current_prog = (start_dt, stop_dt, title)
+                elif start_dt and start_dt > now and next_prog is None:
+                    next_prog = (start_dt, stop_dt, title)
+                if current_prog and next_prog:
                     break
 
             if current_prog:
                 s_str = current_prog[0].strftime("%H:%M")
                 e_str = current_prog[1].strftime("%H:%M")
-                ch["epg_text"] = f"[{s_str}-{e_str}] {current_prog[2]}"
+                if next_prog:
+                    n_str = next_prog[0].strftime("%H:%M")
+                    ch["epg_text"] = f"[{s_str}-{e_str}] {current_prog[2]} | Poi {n_str}: {next_prog[2]}"
+                else:
+                    ch["epg_text"] = f"[{s_str}-{e_str}] {current_prog[2]}"
             elif progs:
                 ch["epg_text"] = f"OK ({len(progs)} eventi)"
             else:
@@ -1515,7 +2650,7 @@ class IPTVCheckerApp:
         win.geometry("640x420")
         win.transient(self.root)
 
-        txt = tk.Text(win, wrap=tk.WORD, padx=10, pady=10)
+        txt = tk.Text(win, wrap=tk.WORD, padx=10, pady=10, font=("Segoe UI", 9))
         txt.pack(fill=tk.BOTH, expand=True)
 
         now = datetime.now().astimezone()
@@ -1530,7 +2665,7 @@ class IPTVCheckerApp:
             txt.insert(tk.END, "\n")
         txt.config(state=tk.DISABLED)
 
-    # --- Gestione Player ---
+    # --- Gestione Player Esterno ---
     def _auto_detect_player(self):
         self.detected_players = {"vlc": "", "ffplay": ""}
         vlc_path = shutil.which("vlc")
@@ -1544,11 +2679,17 @@ class IPTVCheckerApp:
                     break
         self.detected_players["vlc"] = vlc_path or ""
         self.detected_players["ffplay"] = shutil.which("ffplay") or ""
+
+        saved_exe = self.saved_cfg.get("player_exe", "").strip()
+        choice = self.player_type_var.get()
+        if saved_exe and os.path.isfile(saved_exe):
+            self.detected_players[choice] = saved_exe
         self._on_player_type_change()
 
     def _on_player_type_change(self):
         choice = self.player_type_var.get()
         self.player_exe_var.set(self.detected_players.get(choice, ""))
+        self._refresh_ffmpeg_badge()
 
     def _browse_player(self):
         path = filedialog.askopenfilename(
@@ -1559,11 +2700,12 @@ class IPTVCheckerApp:
             choice = self.player_type_var.get()
             self.detected_players[choice] = path
             self.player_exe_var.set(path)
+            self._refresh_ffmpeg_badge()
 
     def _play_selected(self):
         sel = self._get_selected_channels()
         if not sel:
-            messagebox.showinfo("Nessuna selezione", "Seleziona un canale nella tabella (o fai doppio clic) per avviarlo.")
+            messagebox.showinfo("Nessuna selezione", "Seleziona un canale nella tabella per avviarlo sul player esterno.")
             return
 
         ch = sel[0]
@@ -1600,7 +2742,7 @@ class IPTVCheckerApp:
         except Exception as e:
             messagebox.showerror("Errore avvio player", f"Impossibile avviare il player:\n{e}")
 
-    # --- Parsing Playlist M3U ---
+    # --- Parsing Playlist M3U (File, URL o Appunti) ---
     def _load_file(self):
         path = filedialog.askopenfilename(
             title="Seleziona playlist IPTV",
@@ -1612,9 +2754,49 @@ class IPTVCheckerApp:
         try:
             with open(path, "r", encoding="utf-8", errors="replace") as f:
                 content = f.read()
-            self._parse_m3u_content(content)
+            self._parse_m3u_content(content, preserve_epg_box=True)
         except Exception as e:
             messagebox.showerror("Errore lettura file", f"Impossibile aprire il file:\n{e}")
+
+    def _load_m3u_from_url(self, silent=False):
+        url = self.file_path_var.get().strip()
+        if not url.lower().startswith(("http://", "https://")):
+            if not silent:
+                messagebox.showinfo(
+                    "URL M3U non valido",
+                    "Inserisci nella casella 'Playlist M3U' un indirizzo valido che inizi con http:// oppure https://",
+                )
+            return
+
+        self.load_url_btn.config(state=tk.DISABLED)
+        self.load_seca_btn.config(state=tk.DISABLED)
+        self._style_single_button(self.load_url_btn)
+        self._style_single_button(self.load_seca_btn)
+
+        def worker():
+            err = None
+            content = ""
+            try:
+                req = urllib.request.Request(url, headers={"User-Agent": self.default_ua})
+                with urllib.request.urlopen(req, timeout=18, context=self.ssl_ctx) as resp:
+                    raw = resp.read()
+                content = raw.decode("utf-8", errors="replace")
+            except Exception as e:
+                err = str(e)
+            self.root.after(0, on_done, content, err)
+
+        def on_done(content, err):
+            self.load_url_btn.config(state=tk.NORMAL)
+            self.load_seca_btn.config(state=tk.NORMAL)
+            self._style_single_button(self.load_url_btn)
+            self._style_single_button(self.load_seca_btn)
+            if err:
+                if not silent:
+                    messagebox.showerror("Errore download M3U", f"Impossibile scaricare la playlist dall'URL:\n{err}")
+                return
+            self._parse_m3u_content(content, preserve_epg_box=True)
+
+        threading.Thread(target=worker, daemon=True).start()
 
     def _open_paste_dialog(self):
         win = tk.Toplevel(self.root)
@@ -1626,7 +2808,7 @@ class IPTVCheckerApp:
         ttk.Label(win, text="Incolla qui il testo della playlist M3U oppure uno o più URL (uno per riga):").pack(
             anchor=tk.W, padx=10, pady=(10, 5)
         )
-        txt = tk.Text(win, wrap=tk.NONE)
+        txt = tk.Text(win, wrap=tk.NONE, font=("Consolas", 9))
         txt.pack(fill=tk.BOTH, expand=True, padx=10, pady=(0, 10))
 
         try:
@@ -1640,7 +2822,7 @@ class IPTVCheckerApp:
             raw = txt.get("1.0", tk.END).strip()
             if raw:
                 self.file_path_var.set("[Lista incollata]")
-                self._parse_m3u_content(raw)
+                self._parse_m3u_content(raw, preserve_epg_box=True)
             win.destroy()
 
         btn_row = ttk.Frame(win)
@@ -1648,7 +2830,7 @@ class IPTVCheckerApp:
         ttk.Button(btn_row, text="Carica nella tabella", command=on_confirm).pack(side=tk.RIGHT)
         ttk.Button(btn_row, text="Annulla", command=win.destroy).pack(side=tk.RIGHT, padx=(0, 6))
 
-    def _parse_m3u_content(self, content):
+    def _parse_m3u_content(self, content, preserve_epg_box=True):
         lines = [line.strip() for line in content.splitlines() if line.strip()]
         parsed = []
         self.m3u_header_epg = ""
@@ -1667,7 +2849,7 @@ class IPTVCheckerApp:
                 m_epg = re.search(r'(?:url-tvg|x-tvg-url)\s*=\s*"([^"]+)"', line, re.IGNORECASE)
                 if m_epg:
                     self.m3u_header_epg = m_epg.group(1).strip()
-                    if not self.epg_source_var.get().strip():
+                    if not preserve_epg_box or not self.epg_source_var.get().strip():
                         self.epg_source_var.set(self.m3u_header_epg)
                 continue
             elif line.startswith("#EXTINF:"):
@@ -1719,15 +2901,20 @@ class IPTVCheckerApp:
                                 ref = val
 
                 idx = len(parsed) + 1
+                self.uid_counter += 1
                 name = current_name or f"Canale {idx}"
                 country = detect_country(current_extinf, current_group, name, clean_url)
                 epg_label = f"tvg-id: {current_tvg_id}" if current_tvg_id else "N/D"
 
                 parsed.append(
                     {
+                        "uid": self.uid_counter,
+                        "orig_idx": idx,
                         "idx": idx,
+                        "favorite": False,
                         "name": name,
                         "country": country,
+                        "quality": "-",
                         "tvg_id": current_tvg_id,
                         "tvg_name": current_tvg_name,
                         "epg_matched_id": None,
@@ -1755,7 +2942,7 @@ class IPTVCheckerApp:
 
         self.channels = parsed
         if self.epg_channels:
-            self._match_channels_with_epg()
+            self._match_channels_with_epg(use_smart_fallback=True)
         self._update_country_filter_options()
         self.progress["value"] = 0
         self.progress["maximum"] = max(1, len(self.channels))
@@ -1773,31 +2960,42 @@ class IPTVCheckerApp:
         flt = self.filter_var.get()
         if flt != "ALL" and ch["status"] != flt:
             return False
+        if self.fav_only_var.get() and not ch.get("favorite", False):
+            return False
         c_flt = self.country_filter_var.get()
         if c_flt and c_flt != "Tutti i paesi" and ch["country"] != c_flt:
             return False
+        q = self.search_query_var.get().strip().lower()
+        if q:
+            if q not in ch["name"].lower():
+                return False
         return True
 
-    def _get_row_display_values_and_tag(self, ch):
-        rec_state = self._get_channel_rec_state(ch["idx"])
+    def _get_row_display_values_and_tag(self, ch, row_pos=0):
+        rec_state = self._get_channel_rec_state(ch["uid"])
         if rec_state == "RECORDING":
-            status_label = "REC ●"
-            tag = "RECORDING"
+            status_label = "● REC"
+            base_tag = "RECORDING"
         elif rec_state == "WAITING":
-            status_label = "TIMER ⏰"
-            tag = "WAITING"
+            status_label = "⏰ TIMER"
+            base_tag = "WAITING"
         else:
             status_label = {
-                "ONLINE": "ONLINE",
-                "OFFLINE": "OFFLINE",
-                "PENDING": "IN ATTESA",
+                "ONLINE": "● ONLINE",
+                "OFFLINE": "✖ OFFLINE",
+                "PENDING": "○ ATTESA",
             }.get(ch["status"], ch["status"])
-            tag = ch["status"]
+            base_tag = ch["status"]
+
+        tag = f"{base_tag}_ALT" if (row_pos % 2 == 1) else base_tag
+        fav_star = "★" if ch.get("favorite", False) else "☆"
         vals = (
             ch["idx"],
+            fav_star,
             status_label,
             ch["country"],
             ch["name"],
+            ch.get("quality", "-"),
             ch["epg_text"],
             ch["latency"],
             ch["detail"],
@@ -1806,35 +3004,45 @@ class IPTVCheckerApp:
         return vals, tag
 
     def _update_channel_row_visual(self, ch):
-        iid = str(ch["idx"])
+        iid = str(ch["uid"])
         if self.tree.exists(iid):
-            vals, tag = self._get_row_display_values_and_tag(ch)
+            row_pos = self.tree.index(iid)
+            vals, tag = self._get_row_display_values_and_tag(ch, row_pos=row_pos)
             self.tree.item(iid, values=vals, tags=(tag,))
 
     def _refresh_tree(self):
         self.tree.delete(*self.tree.get_children())
 
+        row_pos = 0
         for ch in self.channels:
             if not self._matches_filters(ch):
                 continue
-            vals, tag = self._get_row_display_values_and_tag(ch)
+            vals, tag = self._get_row_display_values_and_tag(ch, row_pos=row_pos)
             self.tree.insert(
                 "",
                 tk.END,
-                iid=str(ch["idx"]),
+                iid=str(ch["uid"]),
                 values=vals,
                 tags=(tag,),
             )
+            row_pos += 1
 
     def _update_stats(self):
         total = len(self.channels)
         online = sum(1 for c in self.channels if c["status"] == "ONLINE")
         offline = sum(1 for c in self.channels if c["status"] == "OFFLINE")
         epg_ok = sum(1 for c in self.channels if c.get("epg_matched_id") or c.get("tvg_id"))
+        fav_cnt = sum(1 for c in self.channels if c.get("favorite"))
 
-        parts = [f"Totale: {total}", f"Online: {online}", f"Offline: {offline}", f"Con EPG: {epg_ok}"]
+        parts = [
+            f"📊 Totale: {total}",
+            f"🟢 Online: {online}",
+            f"🔴 Offline: {offline}",
+            f"🗓️ EPG: {epg_ok}",
+            f"★ Pref: {fav_cnt}",
+        ]
         if self.is_running:
-            parts.append("[Scansione...]")
+            parts.append("⚡ Scansione...")
 
         rec_count = len(self.active_recordings)
         if rec_count == 1:
@@ -1844,7 +3052,7 @@ class IPTVCheckerApp:
             if rec["state"] == "WAITING":
                 rem_start = max(0, int(rec["scheduled_start"] - now))
                 start_hhmm = datetime.fromtimestamp(rec["scheduled_start"]).strftime("%H:%M")
-                parts.append(f"[TIMER {label_rec}: avvio {start_hhmm} (-{format_duration(rem_start)})]")
+                parts.append(f"⏰ TIMER {label_rec}: avvio {start_hhmm} (-{format_duration(rem_start)})")
             else:
                 elapsed = int(now - rec["start_time"])
                 mb = 0.0
@@ -1855,7 +3063,7 @@ class IPTVCheckerApp:
                     time_info = f"{format_duration(elapsed)}/{format_duration(rec['limit_seconds'])} (-{format_duration(rem)})"
                 else:
                     time_info = format_duration(elapsed)
-                parts.append(f"[REC {label_rec}: {time_info} | {mb:.1f} MB]")
+                parts.append(f"🔴 REC {label_rec}: {time_info} ({mb:.1f} MB)")
         elif rec_count > 1:
             n_rec = sum(1 for r in self.active_recordings.values() if r["state"] == "RECORDING")
             n_wait = sum(1 for r in self.active_recordings.values() if r["state"] == "WAITING")
@@ -1864,9 +3072,9 @@ class IPTVCheckerApp:
                 for r in self.active_recordings.values()
                 if r["state"] == "RECORDING" and os.path.isfile(r["file_path"])
             )
-            parts.append(f"[REC: {n_rec} | TIMER: {n_wait} | Tot {total_mb:.1f} MB]")
+            parts.append(f"🔴 REC: {n_rec} | ⏰ TIMER: {n_wait} ({total_mb:.1f} MB)")
 
-        self.stats_var.set("  |  ".join(parts))
+        self.stats_var.set("  •  ".join(parts))
 
     def _read_bounded(self, resp, max_bytes, deadline):
         chunks = []
@@ -1898,7 +3106,7 @@ class IPTVCheckerApp:
             total += len(part)
         return b"".join(chunks)
 
-    def _check_single_channel(self, ch, timeout, deep_check, session_id):
+    def _check_single_channel(self, ch, timeout, deep_check, probe_quality, session_id):
         if self.stop_requested or session_id != self.check_session_id:
             return ch
 
@@ -1909,6 +3117,7 @@ class IPTVCheckerApp:
         if not url.lower().startswith(("http://", "https://")):
             ch["status"] = "OFFLINE"
             ch["latency"] = "-"
+            ch["quality"] = "-"
             ch["detail"] = "Protocollo non HTTP(S)"
             return ch
 
@@ -1933,10 +3142,11 @@ class IPTVCheckerApp:
                 elapsed_ms = int((time.perf_counter() - start_t) * 1000)
                 ch["status"] = "OFFLINE"
                 ch["latency"] = f"{elapsed_ms} ms"
+                ch["quality"] = "-"
                 ch["detail"] = f"HTTP {code}"
                 return ch
 
-            target_bytes = 2048 if deep_check else 16
+            target_bytes = 4096 if deep_check else 16
             chunk = self._read_bounded(resp, target_bytes, deadline)
             elapsed_ms = int((time.perf_counter() - start_t) * 1000)
 
@@ -1944,6 +3154,7 @@ class IPTVCheckerApp:
                 if not chunk:
                     ch["status"] = "OFFLINE"
                     ch["latency"] = f"{elapsed_ms} ms"
+                    ch["quality"] = "-"
                     ch["detail"] = "Risposta vuota (0 byte)"
                     return ch
 
@@ -1954,36 +3165,54 @@ class IPTVCheckerApp:
                     if "#EXT-X-ENDLIST" in text_sample and "#EXTINF" not in text_sample:
                         ch["status"] = "OFFLINE"
                         ch["latency"] = f"{elapsed_ms} ms"
+                        ch["quality"] = "-"
                         ch["detail"] = "Manifest vuoto / scaduto"
                     else:
                         ch["status"] = "ONLINE"
                         ch["latency"] = f"{elapsed_ms} ms"
                         ch["detail"] = f"HTTP {code} (HLS valido)"
+                        q_hls = parse_hls_quality(text_sample) if probe_quality else ""
+                        if q_hls:
+                            ch["quality"] = q_hls
+                        elif probe_quality and not self.stop_requested:
+                            ch["quality"] = self._probe_stream_resolution(url, ua, referer, timeout) or "HLS"
+                        else:
+                            ch["quality"] = "HLS"
                 elif text_sample.lower().startswith("<!doctype html") or text_sample.lower().startswith("<html"):
                     ch["status"] = "OFFLINE"
                     ch["latency"] = f"{elapsed_ms} ms"
+                    ch["quality"] = "-"
                     ch["detail"] = "Pagina HTML (no stream)"
                 elif is_m3u_url and "#EXT" not in text_sample:
                     ch["status"] = "OFFLINE"
                     ch["latency"] = f"{elapsed_ms} ms"
+                    ch["quality"] = "-"
                     ch["detail"] = "Manifest non valido"
                 else:
                     ch["status"] = "ONLINE"
                     ch["latency"] = f"{elapsed_ms} ms"
                     ch["detail"] = f"HTTP {code} (Flusso attivo)"
+                    if probe_quality and not self.stop_requested:
+                        ch["quality"] = self._probe_stream_resolution(url, ua, referer, timeout) or "Stream"
+                    else:
+                        ch["quality"] = "Stream"
             else:
                 ch["status"] = "ONLINE"
                 ch["latency"] = f"{elapsed_ms} ms"
                 ch["detail"] = f"HTTP {code}"
+                if probe_quality and not self.stop_requested:
+                    ch["quality"] = self._probe_stream_resolution(url, ua, referer, timeout) or "-"
 
         except urllib.error.HTTPError as e:
             elapsed_ms = int((time.perf_counter() - start_t) * 1000)
             ch["status"] = "OFFLINE"
             ch["latency"] = f"{elapsed_ms} ms"
+            ch["quality"] = "-"
             ch["detail"] = f"HTTP {e.code} ({e.reason})"
         except urllib.error.URLError as e:
             ch["status"] = "OFFLINE"
             ch["latency"] = "-"
+            ch["quality"] = "-"
             reason = str(getattr(e, "reason", e))
             if "timed out" in reason.lower():
                 ch["detail"] = "Timeout connessione"
@@ -1992,10 +3221,12 @@ class IPTVCheckerApp:
         except (socket.timeout, TimeoutError):
             ch["status"] = "OFFLINE"
             ch["latency"] = "-"
+            ch["quality"] = "-"
             ch["detail"] = "Timeout lettura flusso"
         except Exception as e:
             ch["status"] = "OFFLINE"
             ch["latency"] = "-"
+            ch["quality"] = "-"
             ch["detail"] = f"Errore: {str(e)[:35]}"
         finally:
             if resp is not None:
@@ -2017,6 +3248,7 @@ class IPTVCheckerApp:
         for ch in targets:
             ch["status"] = "PENDING"
             ch["latency"] = "-"
+            ch["quality"] = "-"
             ch["detail"] = "Verifica..."
 
         self.check_session_id += 1
@@ -2031,7 +3263,11 @@ class IPTVCheckerApp:
         self.is_running = True
         self.stop_requested = False
         self.start_btn.config(state=tk.DISABLED)
+        self.retry_offline_btn.config(state=tk.DISABLED)
         self.stop_btn.config(state=tk.NORMAL)
+        self._style_single_button(self.start_btn)
+        self._style_single_button(self.retry_offline_btn)
+        self._style_single_button(self.stop_btn)
         self.progress["value"] = 0
         self.progress["maximum"] = len(targets)
 
@@ -2041,12 +3277,13 @@ class IPTVCheckerApp:
         timeout = max(2, int(self.timeout_var.get()))
         workers = max(1, min(30, int(self.workers_var.get())))
         deep_check = self.deep_check_var.get()
+        probe_quality = self.probe_quality_var.get()
 
         self.root.after(120, self._poll_ui_updates, current_session)
 
         thread = threading.Thread(
             target=self._worker_pool,
-            args=(list(targets), timeout, workers, deep_check, current_session),
+            args=(list(targets), timeout, workers, deep_check, probe_quality, current_session),
             daemon=True,
         )
         thread.start()
@@ -2057,18 +3294,22 @@ class IPTVCheckerApp:
             self.check_session_id += 1
             self.is_running = False
             self.start_btn.config(state=tk.NORMAL)
+            self.retry_offline_btn.config(state=tk.NORMAL)
             self.stop_btn.config(state=tk.DISABLED)
+            self._style_single_button(self.start_btn)
+            self._style_single_button(self.retry_offline_btn)
+            self._style_single_button(self.stop_btn)
             for ch in self.channels:
                 if ch["status"] == "PENDING" and ch["detail"] == "Verifica...":
                     ch["detail"] = "Interrotto"
             self._refresh_tree()
             self._update_stats()
 
-    def _worker_pool(self, targets, timeout, workers, deep_check, session_id):
+    def _worker_pool(self, targets, timeout, workers, deep_check, probe_quality, session_id):
         executor = concurrent.futures.ThreadPoolExecutor(max_workers=workers)
         try:
             futures = [
-                executor.submit(self._check_single_channel, ch, timeout, deep_check, session_id)
+                executor.submit(self._check_single_channel, ch, timeout, deep_check, probe_quality, session_id)
                 for ch in targets
             ]
             for fut in concurrent.futures.as_completed(futures):
@@ -2104,13 +3345,14 @@ class IPTVCheckerApp:
             self.progress["value"] = completed
             need_full_refresh = False
             for ch in batch:
-                iid = str(ch["idx"])
+                iid = str(ch["uid"])
                 visible = self._matches_filters(ch)
                 if self.tree.exists(iid):
                     if not visible:
                         self.tree.delete(iid)
                     else:
-                        vals, tag = self._get_row_display_values_and_tag(ch)
+                        row_pos = self.tree.index(iid)
+                        vals, tag = self._get_row_display_values_and_tag(ch, row_pos=row_pos)
                         self.tree.item(iid, values=vals, tags=(tag,))
                 elif visible:
                     need_full_refresh = True
@@ -2123,7 +3365,11 @@ class IPTVCheckerApp:
             self.is_running = False
             self.stop_requested = False
             self.start_btn.config(state=tk.NORMAL)
+            self.retry_offline_btn.config(state=tk.NORMAL)
             self.stop_btn.config(state=tk.DISABLED)
+            self._style_single_button(self.start_btn)
+            self._style_single_button(self.retry_offline_btn)
+            self._style_single_button(self.stop_btn)
             self._update_stats()
         elif self.is_running:
             self.root.after(120, self._poll_ui_updates, session_id)
@@ -2137,7 +3383,7 @@ class IPTVCheckerApp:
 
     def _get_selected_channels(self):
         selected_ids = set(self.tree.selection())
-        return [ch for ch in self.channels if str(ch["idx"]) in selected_ids]
+        return [ch for ch in self.channels if str(ch["uid"]) in selected_ids]
 
     def _copy_selected_url(self):
         sel = self._get_selected_channels()
@@ -2158,14 +3404,14 @@ class IPTVCheckerApp:
         selected_ids = set(self.tree.selection())
         if not selected_ids:
             return
-        self.channels = [ch for ch in self.channels if str(ch["idx"]) not in selected_ids]
+        self.channels = [ch for ch in self.channels if str(ch["uid"]) not in selected_ids]
         for i, ch in enumerate(self.channels, start=1):
             ch["idx"] = i
         self._update_country_filter_options()
         self._refresh_tree()
         self._update_stats()
 
-    def _export_m3u(self, only_online=True):
+    def _export_m3u(self, mode="online"):
         if not self.channels:
             messagebox.showwarning("Lista vuota", "Nessun canale da esportare.")
             return
@@ -2173,22 +3419,38 @@ class IPTVCheckerApp:
         c_flt = self.country_filter_var.get()
         to_export = []
         for ch in self.channels:
-            if only_online and ch["status"] != "ONLINE":
-                continue
-            if not only_online and not self._matches_filters(ch):
-                continue
-            if only_online and c_flt and c_flt != "Tutti i paesi" and ch["country"] != c_flt:
-                continue
+            if mode == "online":
+                if ch["status"] != "ONLINE":
+                    continue
+                if c_flt and c_flt != "Tutti i paesi" and ch["country"] != c_flt:
+                    continue
+                if self.fav_only_var.get() and not ch.get("favorite", False):
+                    continue
+            elif mode == "epg":
+                if not (ch.get("epg_matched_id") or ch.get("tvg_id")):
+                    continue
+                if ch["status"] == "OFFLINE":
+                    continue
+            elif mode == "view":
+                if not self._matches_filters(ch):
+                    continue
             to_export.append(ch)
 
         if not to_export:
             messagebox.showwarning(
                 "Nessun canale valido",
-                "Non ci sono canali corrispondenti ai filtri selezionati da esportare.",
+                "Non ci sono canali corrispondenti ai criteri selezionati da esportare.",
             )
             return
 
-        default_name = "playlist_valida.m3u" if only_online else "playlist_filtrata.m3u"
+        to_export.sort(key=lambda c: 0 if c.get("favorite", False) else 1)
+
+        name_map = {
+            "online": "playlist_valida.m3u",
+            "epg": "playlist_con_epg.m3u",
+            "view": "playlist_filtrata.m3u",
+        }
+        default_name = name_map.get(mode, "playlist_valida.m3u")
         save_path = filedialog.asksaveasfilename(
             title="Salva playlist M3U",
             defaultextension=".m3u",
@@ -2198,8 +3460,12 @@ class IPTVCheckerApp:
         if not save_path:
             return
 
-        epg_attr = self.epg_source_var.get().strip() or self.m3u_header_epg
-        header = f'#EXTM3U url-tvg="{epg_attr}"' if epg_attr.startswith(("http://", "https://")) else "#EXTM3U"
+        raw_epg = self.epg_source_var.get().strip() or self.m3u_header_epg
+        epg_urls = [u for u in self._split_epg_sources(raw_epg) if u.lower().startswith(("http://", "https://"))]
+        if epg_urls:
+            header = f'#EXTM3U url-tvg="{",".join(epg_urls)}"'
+        else:
+            header = "#EXTM3U"
 
         out_lines = [header]
         for ch in to_export:
