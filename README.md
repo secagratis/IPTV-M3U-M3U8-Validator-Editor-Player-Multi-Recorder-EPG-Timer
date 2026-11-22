@@ -1,83 +1,87 @@
-╔══════════════════════════════════════════════════════════════════════════════╗
-║                                                                              ║
-║      📺  IPTV M3U / M3U8 VALIDATOR, EDITOR, PLAYER & EPG TIMER RECORDER      ║
-║                                                                              ║
-║          Gestione, Verifica, Guida EPG e Registrazione Multi-Canale          ║
-║                                                                              ║
-╚══════════════════════════════════════════════════════════════════════════════╝
+================================================================================
+IPTV STUDIO PRO - LEGGIMI (README)
+================================================================================
 
+Applicazione desktop in Python (tkinter) per caricare, validare, organizzare e
+riprodurre playlist IPTV .m3u / .m3u8, associare guide EPG XMLTV, registrare
+flussi video (immediati, a tempo o programmati con timer) e compilare un
+eseguibile autonomo con PyInstaller.
 
-  📌 PANORAMICA
-  ────────────────────────────────────────────────────────────────────────────
-  Utility desktop per Windows progettata per analizzare, ripulire, modificare,
-  riprodurre e registrare playlist IPTV (.m3u / .m3u8) con integrazione
-  completa della guida programmi elettronica EPG in formato XMLTV.
+--------------------------------------------------------------------------------
+1. FUNZIONALITA PRINCIPALI
+--------------------------------------------------------------------------------
+- Gestione playlist M3U:
+  Caricamento da URL remoto (inclusa lista predefinita Seca), file locale
+  .m3u/.m3u8 o testo incollato, con gestione di User-Agent, Referer, preferiti
+  (*), spostamento righe, ripristino ordine originale (Ordine Orig.) e
+  rimozione duplicati.
 
+- Verifica flussi e risoluzione:
+  Controllo concorrente dello stato ONLINE / OFFLINE, latenza e manifest HLS,
+  con rilevamento risoluzione tramite ffprobe limitato a 3 thread simultanei per
+  evitare saturazioni e pulsante "Retry Offline" per ritestare solo i canali
+  non raggiungibili.
 
-  ✨ FUNZIONALITÀ PRINCIPALI
-  ────────────────────────────────────────────────────────────────────────────
+- Guida EPG XMLTV e Timer:
+  Caricamento di file .xml / .xml.gz o URL multipli, abbinamento automatico e
+  manuale (tvg-id), anteprima del programma in onda e del successivo,
+  programmazione timer con anticipo/margine e salvataggio automatico dei timer
+  futuri in iptv_studio_config.json.
 
-  1. 📂 CARICAMENTO & ANALISI PLAYLIST
-     • Apertura diretta di file locali .m3u e .m3u8 ("Apri .m3u / .m3u8...").
-     • Inserimento rapido tramite appunti ("Incolla Lista / URL").
-     • Rilevamento automatico di Paese, Categoria (group-title), ID EPG
-       (tvg-id), User-Agent e Referer per ogni singolo flusso.
+- Player integrato e player esterno:
+  Riproduzione diretta nel pannello laterale tramite ffplay (con aggancio
+  finestra Win32 e ridimensionamento) oppure avvio su player esterno (VLC o
+  ffplay).
 
-  2. ⚡ VERIFICA VELOCE MULTI-THREAD
-     • Controllo simultaneo dei flussi con numero di thread e timeout
-       personalizzabili.
-     • Analisi approfondita del manifest HLS (#EXTM3U e segmenti) per
-       scartare link scaduti, flussi vuoti o pagine HTML di errore.
-     • Filtri istantanei per Paese e Stato (Tutti / Solo Online / Solo Offline).
+- Registrazione video:
+  Salvataggio flussi in .ts o .mp4 tramite ffmpeg (con fallback HLS se ffmpeg
+  non e presente), cartella predefinita configurabile e apertura rapida
+  ("Apri").
 
-  3. 🗓️ GUIDA EPG (XMLTV) & EDITOR CANALI
-     • Caricamento guida EPG da URL remoto o da file locale (.xml / .xml.gz).
-     • Rilevamento automatico dell'indirizzo EPG nell'intestazione #EXTM3U.
-     • Visualizzazione in tempo reale del programma "In Onda Ora" in tabella.
-     • Finestra "Modifica / EPG" (anche con tasto destro sul canale):
-       - Modifica Nome Canale, Paese, URL Flusso, User-Agent e Referer.
-       - Ricerca istantanea nella guida XMLTV e abbinamento manuale del tvg-id.
+- Esportazione mirata:
+  Salvataggio di playlist .m3u con preferiti in cima nelle modalita "M3U
+  Pulita" (ONLINE), "Con EPG" e "Vista" corrente.
 
-  4. ▶️ RIPRODUZIONE DIRETTA SU PLAYER
-     • Doppio clic su qualsiasi canale (o pulsante "Riproduci") per avviarlo
-       su VLC o ffplay con invio automatico di User-Agent e Referer.
+--------------------------------------------------------------------------------
+2. PREREQUISITI E STRUMENTI CONSIGLIATI
+--------------------------------------------------------------------------------
+- Python 3.x (con tkinter incluso) per eseguire o compilare lo script.
+- PyInstaller per creare l'eseguibile .exe autonomo.
+- FFmpeg (ffmpeg.exe, ffprobe.exe, ffplay.exe): opzionale ma consigliato per
+  rilevamento risoluzione, player integrato e registrazione stabile dei flussi.
+- VLC Media Player: opzionale per la riproduzione esterna.
 
-  5. 🔴 REGISTRAZIONE VIDEO & TIMER PROGRAMMATO DA EPG
-     • Registrazione Immediata / a Tempo:
-       Imposta i minuti in "Min (0=∞)" e premi "Registra Video" (.ts / .mp4).
-     • Registrazione & Timer da Guida EPG ("Registra da EPG..."):
-       - Evento IN ONDA ORA ➔ avvio immediato e stop automatico a fine
-         programma (con margine extra configurabile).
-       - Evento FUTURO      ➔ imposta un Timer in attesa che avvia e ferma
-         la registrazione in automatico all'orario previsto.
-     • Multi-Registrazione & Gestione Timer ("Timer / Reg. (N)"):
-       Permette di registrare o programmare più canali contemporaneamente,
-       monitorando avanzamento, dimensione file e stato dei timer.
+--------------------------------------------------------------------------------
+3. COMPILAZIONE CON PYINSTALLER
+--------------------------------------------------------------------------------
+Apri il terminale nella cartella contenente iptv_checker.py ed esegui:
 
-  6. 💾 ESPORTAZIONE PLAYLIST PULITA
-     • "Esporta M3U Pulita": crea un nuovo file .m3u con i soli canali ONLINE
-       (rispettando il filtro Paese) e i tag tvg-id aggiornati.
-     • "Esporta Vista (.m3u)": salva tutti i canali attualmente filtrati.
+    pyinstaller --onefile --windowed --name IPTV_Studio_Pro iptv_checker.py
 
+- L'eseguibile verra creato in dist\IPTV_Studio_Pro.exe.
+- Al primo avvio, nella stessa cartella dell'eseguibile verra generato
+  iptv_studio_config.json per salvare tema, sorgenti, preferenze
+  player/registrazione e timer in attesa.
 
-  ⚙️ REQUISITI CONSIGLIATI
-  ────────────────────────────────────────────────────────────────────────────
-  • Player Video : VLC Media Player oppure ffplay.exe installati sul PC
-                   (rilevati in automatico o selezionabili via "Sfoglia...").
-  • Registrazione: Per la massima compatibilità (.ts e .mp4 con riconnessione
-                   automatica), copia "ffmpeg.exe" nella stessa cartella del
-                   programma (oppure nella cartella di VLC / PATH di Windows).
-                   In assenza di ffmpeg entra in funzione il motore interno
-                   Python per flussi HLS (.m3u8).
+--------------------------------------------------------------------------------
+4. USO RAPIDO
+--------------------------------------------------------------------------------
+1. Carica una playlist: inserisci un URL o un file M3U nella barra in alto
+   oppure clicca "Lista Seca" / "Incolla Lista".
+2. Carica l'EPG (opzionale): indica uno o piu file/URL XMLTV e clicca
+   "Carica EPG" (o "Auto-EPG" per forzare l'abbinamento).
+3. Controlla i canali: imposta Timeout, Thread e opzioni HLS/Risoluzione,
+   quindi clicca "Avvia Controllo Flussi".
+4. Guarda o registra: seleziona un canale e usa "Player" (o doppio clic),
+   "Esterno", "Registra" oppure "Reg. da EPG...".
+5. Esporta la lista: usa "Esporta M3U Pulita", "Esporta Con EPG" o
+   "Esporta Vista" per salvare il nuovo file .m3u.
 
-
-  🛠️ COMPILAZIONE ESEGUIBILE (.EXE)
-  ────────────────────────────────────────────────────────────────────────────
-  Per rigenerare l'eseguibile standalone dopo eventuali modifiche al codice
-  sorgente "iptv_checker_validator.py":
-
-     1. Avvia con doppio clic ➔ compila_IPTV_Checker_Validator.bat
-     2. Troverai il file aggiornato in ➔ dist\IPTV_Checker_Validator.exe
-
-
-══════════════════════════════════════════════════════════════════════════════
+--------------------------------------------------------------------------------
+5. NOTE PRATICHE
+--------------------------------------------------------------------------------
+- Alcuni flussi IPTV richiedono header specifici (User-Agent / Referer) o
+  restrizioni geografiche/di rete: un canale segnato OFFLINE in un controllo
+  veloce puo risultare riproducibile con "Retry Offline" o su player esterno.
+- Per il player integrato, assicurati che ffplay.exe sia presente nel PATH,
+  nella cartella del programma oppure accanto al player configurato.
